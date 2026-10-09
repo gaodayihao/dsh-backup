@@ -66,6 +66,7 @@ _(把下一次改动的条目写在这里,发版时把标题改成版本号与�
 - **`rescue.mjs --dry-run` 会把整个备份解包到暂存区且从不清理 → 根因:预演分支在 `writeFile(staged, …)` 之后才 `continue`,而清理暂存区的代码被 `if (!dryRun)` 包住。** 预演本应零写入,实际却在 `~/.dsh/.dsh-backup-staging/` 留下一份完整解包数据;救援场景下 dsh 已经停了,没有 `cleanupStale` 来收尾。修法:预演在读取条目并判定目标后直接 `continue`,不创建暂存目录、不落任何字节。
 - **双击「点我恢复」找不到备份 → 根因:救援控制台的 `defaultBackupDir()` 还在找 `~/Desktop/dsh-backups`,而 0.3.1 已把插件的默认落点改成 `~/Documents/dsh-backups`,本文件当时漏改。** 于是救援工具会报「目录里没有备份」——偏偏这是最需要它工作的时刻。修法:救援端按「文档 → 桌面 → 主目录」顺序探测,优先返回真正存在备份的目录,并在都没有备份时回落到与插件一致的默认值;补回归测试断言两侧一致。
 - **救援控制台把插件清单硬编码还原到 `profiles/web` → 根因:`destFor()` 的 profile 分支写死 `'web'`,违反仓库硬性禁忌 8(新一代 Electron 桌面端用 `desktop` profile)。** 在桌面端做救援恢复会凭空造出一个 `profiles/web/` 目录。修法:改用 `process.env.DSH_PROFILE || 'web'`,与 `resolveProfileName()` 的回落规则一致。
+- **插件装在含空格的路径下时,「下载救援工具包」返回 404 → 根因:`handleRescueDownload()` 用 `new URL(import.meta.url).pathname` 取自身目录,`URL.pathname` 保留百分号编码,路径里的空格变成 `%20` 且从不被解码,于是算出的 `rescue/` 目录不存在、`files.length === 0` 直接 404。** 受影响的不只是 `D:\Program Files\…`,也包括 AGENTS.md 里记录的官方安装路径 `H:\DeepSeek Harness\`——偏偏救援工具包是最需要它的时刻才用的。修法:改用 `fileURLToPath()`。同一处写法在 `rescue/rescue.mjs`(isMain 判定,会导致双击启动器在含空格路径下什么都不做)与两个测试文件里也存在,一并改掉。
 
 ### 兼容
 - 备份格式仍为 **DshBackup v1**(`formatVersion` 不变)。新增的 `payload/credentials/` 对旧版插件属未知子目录,按既有约定「忽略并告警」,不会导致导入失败;反向(旧包进新插件)同理,凭据组件报 `notInBackup`。

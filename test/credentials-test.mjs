@@ -15,6 +15,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 
 import {
   encryptCredentials, decryptCredentials, CredentialsCryptoError,
@@ -123,7 +124,7 @@ async function runImport(reader, layout, mode, componentIds, credentialsPassphra
 const ALL = COMPONENTS.map((c) => c.id)
 const execFileAsync = promisify(execFile)
 const RESCUE_SRC = path.resolve(
-  path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')),
+  path.dirname(fileURLToPath(import.meta.url)),
   '..', 'rescue', 'rescue.mjs',
 )
 

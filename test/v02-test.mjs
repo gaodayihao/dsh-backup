@@ -10,6 +10,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 
 import {
   REDACT_MARKER, redactYamlSecrets, mergeRedactedSettings,
@@ -347,7 +348,7 @@ test('rescue.mjs：verify / restore（只补缺失） / restore --force 覆盖',
   const root = tmpRoot()
   const prevHome = process.env.DSH_HOME
   const prevMnemon = process.env.MNEMON_DATA_DIR
-  const rescueSrc = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', 'rescue', 'rescue.mjs')
+  const rescueSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'rescue', 'rescue.mjs')
   try {
     makeFakeHome(root, 'home-a')
     const layoutA = resolveLayout()

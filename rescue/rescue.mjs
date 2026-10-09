@@ -32,6 +32,7 @@ import os from 'node:os'
 import zlib from 'node:zlib'
 import readline from 'node:readline'
 import nodeCrypto from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 
 // ---------------------------------------------------------------------------
 // 凭据解密（内联自 lib/crypto.js；零第三方依赖，保持救援通道自足）
@@ -618,7 +619,9 @@ async function interactive(dir) {
   }
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
+// 用 fileURLToPath 而非 URL.pathname：后者保留百分号编码，脚本一旦位于含空格的
+// 路径下（`D:\Program Files\…`），isMain 会判定失败，双击启动器就什么都不做。
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))
 if (isMain || process.argv[1]?.toLowerCase().endsWith('rescue.mjs')) {
   main().catch((err) => {
     console.error('错误：', err && err.message ? err.message : err)
