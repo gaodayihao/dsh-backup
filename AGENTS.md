@@ -68,8 +68,13 @@
    node "H:/DeepSeek Harness/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --profile web add <tgz>
    ```
 5. `git tag vX.Y.Z && git push origin vX.Y.Z` —— 推 tag 后 `.github/workflows/publish.yml` 会自动
-   跑全量测试 → 校验 tag 与版本号一致 → `npm pack` → 建 GitHub Release(资产
-   `having5548-dsh-backup-X.Y.Z.tgz`)。**不需要任何 Secret,也不要手工 `npm publish`。**
+   跑全量测试 → 校验 tag 与版本号一致 → `npm pack` → 建 GitHub Release。
+   **不需要任何 Secret,也不要手工 `npm publish`。**
+   Release 会挂两个资产:`having5548-dsh-backup-X.Y.Z.tgz`(钉版本用)与
+   `having5548-dsh-backup.tgz`(固定名,README 里
+   `releases/latest/download/having5548-dsh-backup.tgz` 那个地址依赖它,
+   **不要只留版本化的那个**——`latest/download/<名>` 要求资产名与 URL 完全一致)。
+   重跑同一个 tag 用 `gh release upload --clobber`,workflow 已按可重跑写好。
 
 ## 变更记录规则(必须执行)
 

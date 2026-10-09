@@ -62,9 +62,36 @@ jobs:
       - name: 打包
         run: npm pack
 
-      - name: 创建 GitHub Release（附 tgz 资产）
+      # README 承诺的固定下载地址必须长期有效：
+      #   https://github.com/<owner>/<repo>/releases/latest/download/having5548-dsh-backup.tgz
+      # 而 `npm pack` 产出的是 **带版本号** 的文件名，`latest/download/<名>` 又要求
+      # 资产名与 URL 里的完全一致 —— 只上传版本化文件的话，上面那个地址必然 404。
+      # 所以额外复制一份固定名的（两个都上传：版本化那份用于钉版本，固定名那份用于 latest）。
+      - name: 准备 Release 资产（版本化 + 固定名）
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          test -f "having5548-dsh-backup-${VERSION}.tgz"
+          cp "having5548-dsh-backup-${VERSION}.tgz" "having5548-dsh-backup.tgz"
+          ls -l having5548-dsh-backup*.tgz
+
+      # 用 gh 而不是第三方 action：--clobber 让重跑同一个 tag 也能覆盖，
+      # 不需要先手工删 Release。
+      - name: 创建 / 更新 GitHub Release（附 tgz 资产）
         if: startsWith(github.ref, 'refs/tags/v') && github.event.inputs.dry_run != 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: having5548-dsh-backup-*.tgz
-          generate_release_notes: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          VERSION="${TAG#v}"
+          ASSETS=("having5548-dsh-backup-${VERSION}.tgz" "having5548-dsh-backup.tgz")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$TAG" "${ASSETS[@]}" --title "$TAG" --generate-notes
+          fi
+          gh release view "$TAG" --json assets --jq '.assets[].name'
