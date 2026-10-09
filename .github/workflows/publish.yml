@@ -1,15 +1,19 @@
-name: Publish
+name: Release
 
 # 发布流程（AGENTS.md「版本与发布清单」的自动化部分）：
-#   1. 本地把三处版本号同步好、CHANGELOG 的 [未发布] 改成 [x.y.z]
+#   1. 本地把四处版本号同步好、CHANGELOG 的 [未发布] 改成 [x.y.z]
 #   2. git tag vX.Y.Z && git push origin vX.Y.Z
-#   3. 本工作流跑全量测试 → 校验 tag 与版本号一致 → npm publish → 建 GitHub Release
+#   3. 本工作流跑全量测试 → 校验 tag 与版本号一致 → npm pack → 建 GitHub Release（附 tgz）
 #
-# 需要仓库 Secret：NPM_TOKEN（npm 的 Automation token，绕过 2FA）。
-# 没有它时 tag 推送会在发布那一步失败，测试步骤仍然照常执行。
+# ⚠️ 本 fork **不发布到 npm**。
+# 上游包名 `@having5548/dsh-backup` 属于原作者 having5548 的 npm scope，本仓库
+# 无权 publish（会 403）。因此分发渠道是 GitHub Release，DSH 里用 Release 的
+# tgz 安装：
+#   dsh plugin add https://github.com/gaodayihao/dsh-backup/releases/latest/download/having5548-dsh-backup.tgz
+# 若将来要发 npm，需先把 package.json 的 name 改成自己拥有的 scope。
 #
-# 也可以手动触发（Actions → Publish → Run workflow）做一次 dry run：
-# 只跑测试并 npm pack，不发布。
+# 也可以手动触发（Actions → Release → Run workflow）做一次演练：
+# 只跑测试并打包，不建 Release。
 
 on:
   push:
@@ -17,24 +21,22 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: '只跑测试并打包，不发布'
+        description: '只跑测试并打包，不建 Release'
         type: boolean
         default: true
 
 permissions:
   contents: write # 创建 GitHub Release
-  id-token: write # npm provenance（--provenance）
 
 jobs:
-  publish:
-    name: 测试 → 校验 → 发布
+  release:
+    name: 测试 → 校验 → 发 Release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
@@ -56,16 +58,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: node scripts/verify-version.mjs "${GITHUB_REF_NAME}"
 
-      - name: 打包（tgz 既用于发布，也作为 Release 资产）
+      # tgz 直接作为 Release 资产分发；DSH 可直接从 URL 安装
+      - name: 打包
         run: npm pack
-
-      # npm 的 2FA：CI 里必须用 Automation token（在 npm 后台生成时勾选
-      # "Automation"），否则会卡在 EOTP。详见 AGENTS.md 发布清单第 6 条。
-      - name: 发布到 npm
-        if: startsWith(github.ref, 'refs/tags/v') && github.event.inputs.dry_run != 'true'
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: 创建 GitHub Release（附 tgz 资产）
         if: startsWith(github.ref, 'refs/tags/v') && github.event.inputs.dry_run != 'true'

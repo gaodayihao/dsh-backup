@@ -58,6 +58,7 @@ _(把下一次改动的条目写在这里,发版时把标题改成版本号与�
 - `GET /dsh-backup/disk` 增加 `defaultDestination` 与 `credentialsPassphraseSet`,供面板显示。
 - `test/local-test.mjs` 的 `exportBackup` 改为直接调用 `assembleBackupZip`,不再复刻一份打包逻辑——复刻版会绕过导出侧的改动(脱敏 / 凭据加密),测试就白跑了。
 - CI 补齐此前漏跑的 `test/route-harness.mjs`,并纳入新的 `test/credentials-test.mjs`。
+- **分发渠道改为 GitHub Release,不再发 npm**:上游包名 `@having5548/dsh-backup` 属于原作者 having5548 的 npm scope,本仓库 `npm publish` 必然 403。`.github/workflows/publish.yml` 更名为 `Release`,去掉 npm publish 步骤与 `NPM_TOKEN` 依赖,保留「全量测试 → 校验 tag 与版本号一致 → `npm pack` → 建 GitHub Release(附 tgz 资产)」;`package.json` 的 `repository` / `bugs` / `homepage` 与两个 README 的安装说明改指本 fork;`AGENTS.md` 的发布清单同步改写(四处版本号 + 由 CI 发 Release)。包名沿用原值,因此安装本 fork 的 tgz 会以同名依赖覆盖 profile 里原有的上游插件。
 - `README.md` 同步更新:组件表新增凭据库行、新增「🔑 凭据库加密」章节、救援通道补 `credentials` 与 `--passphrase`、备份格式补 `payload/credentials/`、FAQ 补「忘了密码怎么办」,并修正 Profile 插件清单一栏里写死的 `profiles/web/`。
 
 ### 修复

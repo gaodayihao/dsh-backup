@@ -22,20 +22,19 @@
 | 🗂 **工作区级备份**<br>类似 VS Code 的 Profile 导出：一个 ZIP 携带工作区注册表 + 全部会话 + 附件 + 设置 + 插件清单 | 🔒 **对话字节级保真**<br>会话文件全程不解包、不改写，恢复后 AI 可完整识别全部历史 | 🔁 **版本双向兼容**<br>旧代际会话由 harness 自带迁移链自动升级；未来新版 harness 的会话也能装进当前备份 |
 | 🧠 **mnemon 注入一致**<br>`~/.mnemon` 三目录按字节备份，覆盖导入 = 全量还原，上下文注入与备份时完全一致 | 🔍 **先预检再动手**<br>导入前看清楚将新增 / 覆盖 / 保留多少数据、缺哪些插件；导入后给出逐组件报告 | 🛟 **救援通道**<br>每份磁盘备份都带零依赖的 `rescue.mjs` 与「点我恢复」双击启动器——DSH 起不来也能还原 |
 | 🔀 **合并 / 覆盖双模式**<br>合并只补缺不覆盖（日常）；覆盖整批替换（灾难恢复），语义透明、行为可预期 | ⏰ **自动备份 + 轮换**<br>定时写盘到本机备份目录，每份带 `.sha256` 校验文件，按保留份数自动轮换，重启不中断 | 🩺 **会话体检**<br>一键扫描全部会话文件（zstd 魔数 / 文件头 / 空文件），异常早发现 |
-| 🤖 **/backup 斜杠命令**<br>在对话里直接 `/backup`、`/backup restore latest --dry-run`、`/backup auto 12` | 🔐 **凭据脱敏**<br>导出时 settings.yaml 中的密钥值替换为占位符，明文不出备份包；恢复时自动保留本机现值 | 🩺 **AI 恢复助理（可选）**<br>跨版本导入后一键/自动开新会话让 DeepSeek 核查恢复结果并做最小修复；**默认关闭**，自主控制 token 消耗 |
+| 🤖 **/backup 斜杠命令**<br>在对话里直接 `/backup`、`/backup restore latest --dry-run`、`/backup auto 12` | 🔐 **凭据脱敏 + 凭据库加密**<br>settings.yaml 的密钥值导出时替换为占位符；`.credentials.yaml`（整文件皆为密钥）则用 AES-256-GCM 加密后才入包，未设密码就整条不导出 | 🩺 **AI 恢复助理（可选）**<br>跨版本导入后一键/自动开新会话让 DeepSeek 核查恢复结果并做最小修复；**默认关闭**，自主控制 token 消耗 |
 
 ## 📦 安装
 
-从 npm 安装（推荐）：
+> 本仓库是 [having5548/dsh-backup](https://github.com/having5548/dsh-backup) 的 fork。
+> **本 fork 不发布到 npm**（上游包名 `@having5548/dsh-backup` 属于原作者的 npm scope，
+> 本仓库无权 publish），分发渠道是 GitHub Release。包名沿用 `@having5548/dsh-backup`，
+> 因此安装本 fork 的 tgz 会以同名依赖**覆盖** profile 里原有的那个插件。
+
+从 GitHub Release 安装：
 
 ```bash
-dsh plugin --profile web add @having5548/dsh-backup
-```
-
-或从 GitHub Release 安装：
-
-```bash
-dsh plugin --profile web add https://github.com/having5548/dsh-backup/releases/latest/download/having5548-dsh-backup.tgz
+dsh plugin --profile web add https://github.com/gaodayihao/dsh-backup/releases/latest/download/having5548-dsh-backup.tgz
 ```
 
 本地开发 / 打包：

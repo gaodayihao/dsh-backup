@@ -10,6 +10,12 @@
 插件清单与 dsh-mnemon 记忆数据导出为 DshBackup v1 ZIP,并可预检后合并/覆盖导入。
 发布为 npm 包 `@having5548/dsh-backup`(注意:unscoped `dsh-backup` 被 npm 他人占用,**不要改回**)。
 
+> **本仓库是 [having5548/dsh-backup](https://github.com/having5548/dsh-backup) 的 fork,不发布到 npm。**
+> 上游包名 `@having5548/dsh-backup` 属于原作者的 npm scope,本仓库无权 `npm publish`(会 403)。
+> 分发渠道是 GitHub Release,DSH 里用 Release 的 tgz 安装;包名沿用原值,
+> 因此安装本 fork 的 tgz 会**覆盖** profile 里同名的上游插件。
+> 将来若要发 npm,先把 `package.json` 的 `name` 改成自己拥有的 scope。
+
 ## 代码地图
 
 | 文件 | 职责 |
@@ -17,10 +23,12 @@
 | `lib/index.js` | 服务端入口;`/dsh-backup/*` 路由(status/estimate/export/import/settings/assistant-brief…)+ `/backup` 斜杠命令 + 自动备份调度 |
 | `lib/store.js` | 数据布局、组件模型、workspace/mnemon 合并语义、脱敏、doctor、共享打包、磁盘轮换 |
 | `lib/zip.js` | 纯 JS 流式 ZIP 读写(deflate/store/zip64/CRC32),零第三方依赖 |
+| `lib/crypto.js` | 凭据库加密容器(AES-256-GCM + scrypt),零第三方依赖;明文 sha256 用于覆盖前证明解密正确 |
 | `lib/backupdir.js` | 磁盘备份引擎(写盘 + sha256 sidecar + 救援工具落盘 + 轮换) |
 | `lib/client.js` | 浏览器半部:设置页(`settings.section` 槽位),`__ModuleLoader__` 预打包格式 |
 | `rescue/rescue.mjs` | 零依赖救援控制台(DSH 起不来时的恢复通道),**必须保持零依赖** |
-| `test/*.mjs` | node:test 套件:zip 回环/合并语义/端到端/HTTP 路由台架 |
+| `scripts/verify-version.mjs` | 发布前校验四处版本号一致(不进 npm 包,只在 CI/本地用) |
+| `test/*.mjs` | node:test 套件:zip 回环/合并语义/端到端/HTTP 路由台架/凭据加密 |
 
 ## 硬性禁忌(历史踩坑,违反任意一条 = 线上炸)
 
@@ -47,18 +55,21 @@
 
 ## 版本与发布清单(每次发版逐条打勾)
 
-1. 三处版本号同步:`package.json` `version`、`lib/index.js` `PLUGIN_VERSION`、`lib/store.js` `PLUGIN_VERSION_TAG`
+1. 四处版本号同步:`package.json`、`package-lock.json`、`lib/index.js` `PLUGIN_VERSION`、
+   `lib/store.js` `PLUGIN_VERSION_TAG`(用 `node scripts/verify-version.mjs` 校验,别靠肉眼)
 2. 测试全绿:
    ```bash
-   node --test test/local-test.mjs && node --test test/v02-test.mjs && node --test test/route-harness.mjs
+   node --test test/local-test.mjs && node --test test/v02-test.mjs \
+     && node --test test/credentials-test.mjs && node --test test/route-harness.mjs
    ```
 3. 按「变更记录规则」更新 `CHANGELOG.md`
 4. `npm pack` → 把 tgz 装进本地 profile 验证加载(需把 `H:\DeepSeek Harness\resources\runtime` 加入 PATH 供 pnpm 使用):
    ```bash
    node "H:/DeepSeek Harness/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --profile web add <tgz>
    ```
-5. `git tag vX.Y.Z` + GitHub Release(资产命名 `having5548-dsh-backup-X.Y.Z.tgz`)
-6. `npm publish`(账号开了 2FA:必须真实终端运行,浏览器配置已指向 Edge;非交互 shell 里 EOTP 会打印打码 URL 后退出,无法自动化)
+5. `git tag vX.Y.Z && git push origin vX.Y.Z` —— 推 tag 后 `.github/workflows/publish.yml` 会自动
+   跑全量测试 → 校验 tag 与版本号一致 → `npm pack` → 建 GitHub Release(资产
+   `having5548-dsh-backup-X.Y.Z.tgz`)。**不需要任何 Secret,也不要手工 `npm publish`。**
 
 ## 变更记录规则(必须执行)
 
@@ -76,4 +87,6 @@
 - dsh 数据目录:`~/.dsh`(会话/工作区/设置);mnemon 数据:`~/.mnemon`
 - 本地安装调试:profile 以 `file:` tgz 依赖方式安装;profile 的 `package.json` 里若引用了
   本地 tgz 路径,记得 `npm pack` 后保持文件名一致
-- npm 网页验证自动开在 Edge(`npm config get browser` 已配置)
+- 沙箱/含空格路径自检:本仓库的测试用 `fileURLToPath()` 定位自身,不要退回
+  `new URL(import.meta.url).pathname` —— 后者保留百分号编码,路径里有空格
+  (`D:\Program Files\…`、`H:\DeepSeek Harness\…`)时救援工具包会 404

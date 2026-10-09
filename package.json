@@ -58,12 +58,12 @@
   "author": "having5548",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/having5548/dsh-backup.git"
+    "url": "git+https://github.com/gaodayihao/dsh-backup.git"
   },
   "bugs": {
-    "url": "https://github.com/having5548/dsh-backup/issues"
+    "url": "https://github.com/gaodayihao/dsh-backup/issues"
   },
-  "homepage": "https://github.com/having5548/dsh-backup#readme",
+  "homepage": "https://github.com/gaodayihao/dsh-backup#readme",
   "dependencies": {
     "schemastery": "^3.18.0"
   },
