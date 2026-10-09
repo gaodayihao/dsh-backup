@@ -6,11 +6,11 @@
 //       每次磁盘备份都会把本文件与双击启动器写进备份目录；也可以从插件
 //       仓库 rescue/ 目录单独取用。
 //
-// 零依赖：只用 node:fs / node:path / node:os / node:zlib / node:readline。
+// 零依赖：只用 node:fs / node:path / node:os / node:zlib / node:readline / node:crypto。
 // 用法：
 //   node rescue.mjs list   [--dir <备份目录>]
 //   node rescue.mjs verify <备份.zip>
-//   node rescue.mjs restore <备份.zip> [--dry-run] [--force] [--home <路径>] [--mnemon <路径>]
+//   node rescue.mjs restore <备份.zip> [--dry-run] [--force] [--passphrase <密码>] [--home <路径>] [--mnemon <路径>]
 //   node rescue.mjs help
 // 无参数启动 = 交互式菜单（双击启动器走这条路）。
 //
@@ -19,6 +19,11 @@
 //   --force 时覆盖已有文件，原文件先改名 *.bak-rescue-<时间戳> 保留。
 //   workspace.json / settings.yaml / mnemon 的 SQLite 库与 wal/shm 按字节
 //   还原（SQLite 先清 -wal/-shm 防旧 WAL 配新库）。
+//
+//   .credentials.yaml 在备份里是 AES-256-GCM 密文，不能按字节还原——必须先
+//   解密。没有密码时它会被跳过（绝不把密文写成凭据文件），并在结果里说明。
+//   密码优先级：--passphrase > 环境变量 DSH_BACKUP_CREDENTIALS_PASSPHRASE >
+//   交互式菜单里询问。
 // ============================================================================
 
 import fs from 'node:fs'
@@ -26,6 +31,80 @@ import path from 'node:path'
 import os from 'node:os'
 import zlib from 'node:zlib'
 import readline from 'node:readline'
+import nodeCrypto from 'node:crypto'
+
+// ---------------------------------------------------------------------------
+// 凭据解密（内联自 lib/crypto.js；零第三方依赖，保持救援通道自足）
+// ---------------------------------------------------------------------------
+
+const CREDENTIALS_FORMAT = 'dsh-backup-credentials'
+const CREDENTIALS_KDF_MAXMEM = 96 * 1024 * 1024
+/** 与 lib/store.js 的 BACKUP_NAME_RE 保持一致。 */
+const BACKUP_NAME_RE = /^dsh-backup-\d{8}-\d{6}\.zip$/
+
+/** 与 lib/crypto.js 的容器格式一致；任何失败都抛错，绝不返回半成品字节。 */
+function decryptCredentialsEnvelope(envelope, passphrase) {
+  const pass = String(passphrase == null ? '' : passphrase)
+  if (!pass) throw new Error('未提供凭据解密密码')
+  let env
+  try { env = JSON.parse(Buffer.isBuffer(envelope) ? envelope.toString('utf8') : String(envelope)) }
+  catch { throw new Error('凭据容器不是合法 JSON') }
+  if (!env || env.format !== CREDENTIALS_FORMAT) throw new Error('凭据容器格式不符：' + ((env && env.format) || '未知'))
+  if (Number(env.version) > 1) throw new Error('凭据容器版本过新：v' + env.version + '，请升级 dsh-backup')
+  const kdf = env.kdf || {}
+  const cipherSpec = env.cipher || {}
+  if (kdf.name !== 'scrypt' || cipherSpec.name !== 'aes-256-gcm') {
+    throw new Error('不支持的凭据加密算法：' + (kdf.name || '?') + ' / ' + (cipherSpec.name || '?'))
+  }
+  const params = { N: Number(kdf.N), r: Number(kdf.r), p: Number(kdf.p), keylen: Number(kdf.keylen) || 32 }
+  if (!isFinite(params.N) || !isFinite(params.r) || !isFinite(params.p)) throw new Error('凭据容器的 KDF 参数缺失或非法')
+  if (128 * params.N * params.r > CREDENTIALS_KDF_MAXMEM) throw new Error('凭据容器的 KDF 参数超出允许上限，拒绝解密')
+  const salt = Buffer.from(String(kdf.salt || ''), 'base64')
+  const iv = Buffer.from(String(cipherSpec.iv || ''), 'base64')
+  const tag = Buffer.from(String(cipherSpec.tag || ''), 'base64')
+  const ciphertext = Buffer.from(String(env.ciphertext || ''), 'base64')
+  if (!salt.length || !iv.length || !tag.length) throw new Error('凭据容器的 salt / iv / tag 缺失')
+  const key = nodeCrypto.scryptSync(Buffer.from(pass, 'utf8'), salt, params.keylen, {
+    N: params.N, r: params.r, p: params.p, maxmem: CREDENTIALS_KDF_MAXMEM,
+  })
+  const decipher = nodeCrypto.createDecipheriv('aes-256-gcm', key, iv)
+  decipher.setAuthTag(tag)
+  let plain
+  try { plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]) }
+  catch { throw new Error('密码不正确，或凭据容器已损坏（GCM 校验失败）') }
+  const expect = env.plaintext && env.plaintext.sha256
+  if (expect) {
+    const got = nodeCrypto.createHash('sha256').update(plain).digest('hex')
+    if (got !== String(expect).toLowerCase()) throw new Error('解密结果与容器内记录的 sha256 不符，拒绝使用')
+  }
+  return plain
+}
+
+/** 备份包里的凭据容器是否可解——只读取，不写任何文件。 */
+async function probeCredentialsPassphrase(zipAbs, passphrase) {
+  const reader = new MiniZipReader(zipAbs)
+  await reader.open()
+  try {
+    const entry = reader.entries.find((e) => e.name === 'payload/credentials/.credentials.yaml.enc')
+    if (!entry) return { present: false }
+    const raw = await reader.readEntry(entry)
+    try {
+      const plain = decryptCredentialsEnvelope(raw, passphrase)
+      return { present: true, ok: true, bytes: plain.length }
+    } catch (err) {
+      return { present: true, ok: false, error: err.message }
+    }
+  } finally {
+    await reader.close()
+  }
+}
+
+async function zipHasEncryptedCredentials(zipAbs) {
+  const reader = new MiniZipReader(zipAbs)
+  await reader.open()
+  try { return reader.entries.some((e) => e.name === 'payload/credentials/.credentials.yaml.enc') }
+  finally { await reader.close() }
+}
 
 // ---------------------------------------------------------------------------
 // CRC32 + ZIP 读取（内联自 dsh-backup lib/zip.js 的最小子集）
@@ -143,6 +222,7 @@ function classify(zipPath) {
   if (rest.startsWith('storages/session_projcache/')) return { component: 'projcache', rel: rest.slice('storages/session_projcache/'.length) }
   if (rest.startsWith('attachments/')) return { component: 'attachments', rel: rest.slice('attachments/'.length) }
   if (rest === 'settings/settings.yaml') return { component: 'settings', rel: 'settings.yaml' }
+  if (rest === 'credentials/.credentials.yaml.enc') return { component: 'credentials', rel: '.credentials.yaml.enc', encrypted: true }
   if (rest.startsWith('profile/')) return { component: 'profile', rel: rest.slice('profile/'.length) }
   if (rest.startsWith('mnemon/')) return { component: 'mnemon', rel: rest.slice('mnemon/'.length) }
   if (rest.startsWith('extensions/')) return { component: 'extensions', rel: rest.slice('extensions/'.length) }
@@ -163,7 +243,10 @@ function destFor(home, mnemonRoot, cls) {
     case 'projcache': return join('storages', 'session_projcache', cls.rel)
     case 'attachments': return join('attachments', cls.rel)
     case 'settings': return join('settings.yaml')
-    case 'profile': return safeJoin(join('profiles', 'web'), cls.rel)
+    // 与 lib/store.js 的 destForComponent 保持一致：凭据最终落在 <home>/.credentials.yaml
+    case 'credentials': return join('.credentials.yaml')
+    // 不能硬编码 web：新版桌面端用 desktop profile（AGENTS.md 硬性禁忌 8）
+    case 'profile': return safeJoin(join('profiles', process.env.DSH_PROFILE || 'web'), cls.rel)
     case 'mnemon': return safeJoin(mnemonRoot, cls.rel)
     case 'extensions': {
       const segs = cls.rel.split('/')
@@ -226,19 +309,20 @@ async function commitStaged(staged, dest, force) {
 /**
  * 从备份恢复（救援语义：默认 copy-missing；--force 覆盖并留 .bak）。
  * 暂存区放在目标盘内（dshHome / mnemonRoot 下），rename 同卷原子。
+ * @param opts.credentialsPassphrase 解密 payload/credentials 的密码；缺失时该项被跳过
  */
-export async function rescueRestore(zipAbs, { dryRun = false, force = false, home, mnemonRoot } = {}) {
+export async function rescueRestore(zipAbs, { dryRun = false, force = false, home, mnemonRoot, credentialsPassphrase = '' } = {}) {
   home = path.resolve(home || path.join(os.homedir(), '.dsh'))
   mnemonRoot = path.resolve(mnemonRoot || path.join(os.homedir(), '.mnemon'))
+  const passphrase = String(credentialsPassphrase || process.env.DSH_BACKUP_CREDENTIALS_PASSPHRASE || '')
   const reader = new MiniZipReader(zipAbs)
   await reader.open()
   try {
     const manifestEntry = reader.entries.find((e) => e.name === 'manifest.json')
     const manifest = manifestEntry ? JSON.parse((await reader.readEntry(manifestEntry)).toString('utf8')) : null
-    const plan = { created: [], replaced: [], keptLocal: [], skipped: [] }
+    const plan = { created: [], replaced: [], keptLocal: [], skipped: [], credentials: { present: false, restored: false, reason: null } }
     const stagingId = 'dsh-rescue-' + Date.now() + '-' + Math.random().toString(36).slice(2)
     const stageRoots = new Map() // base → staging dir
-    let mnemonStagingReady = false
 
     for (const entry of reader.entries) {
       if (entry.name.endsWith('/')) continue
@@ -246,6 +330,35 @@ export async function rescueRestore(zipAbs, { dryRun = false, force = false, hom
       if (!cls) continue // manifest/checksums/redaction 等元数据
       let dest
       try { dest = destFor(home, mnemonRoot, cls) } catch { plan.skipped.push(entry.name); continue }
+      let exists = false
+      try { await fs.promises.stat(dest); exists = true } catch { /* absent */ }
+
+      let data = await reader.readEntry(entry)
+      if (cls.encrypted) {
+        // 凭据在包里是密文：绝不能原样写成 .credentials.yaml，
+        // 否则会得到一个 dsh 根本读不了的凭据文件——比不恢复更糟。
+        plan.credentials.present = true
+        if (!passphrase) {
+          plan.credentials.reason = 'no-passphrase'
+          plan.skipped.push(dest + '（加密凭据，未提供密码）')
+          continue
+        }
+        try {
+          data = decryptCredentialsEnvelope(data, passphrase)
+          plan.credentials.restored = true
+        } catch (err) {
+          plan.credentials.reason = err.message
+          plan.skipped.push(dest + '（凭据解密失败：' + err.message + '）')
+          continue
+        }
+      }
+
+      // 预演模式不落任何暂存字节（旧版会把整个 payload 解到暂存区却不清理）
+      if (dryRun) {
+        (exists ? (force ? plan.replaced : plan.keptLocal) : plan.created).push(dest)
+        continue
+      }
+
       const base = dest.startsWith(mnemonRoot) ? mnemonRoot : home
       if (!stageRoots.has(base)) {
         const stage = path.join(base, '.dsh-backup-staging', stagingId)
@@ -255,18 +368,15 @@ export async function rescueRestore(zipAbs, { dryRun = false, force = false, hom
       const stage = stageRoots.get(base)
       const staged = path.join(stage, cls.component, cls.rel.replace(/[/\\]/g, '__'))
       await fs.promises.mkdir(path.dirname(staged), { recursive: true })
-      const data = await reader.readEntry(entry)
-      await fs.promises.writeFile(staged, data)
-      let exists = false
-      try { await fs.promises.stat(dest); exists = true } catch { /* absent */ }
-      if (dryRun) {
-        (exists ? (force ? plan.replaced : plan.keptLocal) : plan.created).push(dest)
-        continue
-      }
+      await fs.promises.writeFile(staged, data, cls.encrypted ? { mode: 0o600 } : undefined)
+
       const res = await commitStaged(staged, dest, force)
       if (res.action === 'created') plan.created.push(dest)
       else if (res.action === 'replaced') plan.replaced.push({ dest, bak: res.bak })
       else plan.keptLocal.push(dest)
+      if (cls.encrypted && res.action !== 'keptLocal') {
+        await fs.promises.chmod(dest, 0o600).catch(() => {})
+      }
     }
 
     if (!dryRun) {
@@ -292,9 +402,27 @@ function fmtBytes(n) {
   return (n / 1073741824).toFixed(2) + ' GB'
 }
 
-function defaultBackupDir() {
-  const desktop = path.join(os.homedir(), 'Desktop', 'dsh-backups')
-  if (fs.existsSync(path.join(os.homedir(), 'Desktop'))) return desktop
+/**
+ * 默认备份目录。
+ * 必须与 lib/backupdir.js 的 defaultBackupDir() 对齐：0.3.1 把插件的默认
+ * 落点从桌面改到「文档」，而本文件当时漏改，于是双击「点我恢复」会去找一个
+ * 插件从不写入的目录，报「目录里没有备份」——偏偏这是最需要它工作的时刻。
+ * 这里再宽松一点：把三个历史位置都探一遍，优先选真正存在备份的那个。
+ */
+export function defaultBackupDir() {
+  const candidates = [
+    path.join(os.homedir(), 'Documents', 'dsh-backups'),
+    path.join(os.homedir(), 'Desktop', 'dsh-backups'),
+    path.join(os.homedir(), 'dsh-backups'),
+  ]
+  for (const dir of candidates) {
+    try {
+      if (fs.readdirSync(dir).some((n) => BACKUP_NAME_RE.test(n))) return dir
+    } catch { /* 不存在或不可读：试下一个 */ }
+  }
+  // 一处备份都没有：回落到与插件一致的默认值
+  const docs = path.join(os.homedir(), 'Documents')
+  if (fs.existsSync(docs)) return path.join(docs, 'dsh-backups')
   return path.join(os.homedir(), 'dsh-backups')
 }
 
@@ -303,7 +431,7 @@ async function listDir(dir) {
   try { items = await fs.promises.readdir(dir) } catch { return [] }
   const out = []
   for (const name of items) {
-    if (!/^dsh-backup-\d{8}-\d{6}\.zip$/.test(name)) continue
+    if (!BACKUP_NAME_RE.test(name)) continue
     const stat = await fs.promises.stat(path.join(dir, name)).catch(() => null)
     if (stat) out.push({ name, size: stat.size, mtime: stat.mtime.toISOString() })
   }
@@ -332,8 +460,12 @@ function printHelp() {
     '  node rescue.mjs restore <备份.zip|latest>  恢复（默认只补缺失文件，绝不覆盖）',
     '      --force                                覆盖已有文件（原文件保留 *.bak-rescue-*）',
     '      --dry-run                              只预览将发生什么，不写入',
+    '      --passphrase <密码>                    解密备份里的 .credentials.yaml（缺省时该项跳过）',
+    '                                             也可用环境变量 DSH_BACKUP_CREDENTIALS_PASSPHRASE',
     '      --dir <备份目录>                       查找 latest 的目录',
     '      --home <路径> --mnemon <路径>          覆盖目标目录（默认 ~/.dsh 与 ~/.mnemon）',
+    '  node rescue.mjs credentials <备份.zip|latest> [--passphrase <密码>]',
+    '                                             只校验凭据库能否解开，不写任何文件',
     '  node rescue.mjs help                       本帮助',
     '',
     '无参数启动 = 交互式菜单。',
@@ -394,20 +526,46 @@ async function main() {
     return
   }
 
+  if (cmd === 'credentials') {
+    let target = argv[1] && !argv[1].startsWith('--') ? argv[1] : null
+    if (!target || target === 'latest') target = await pickLatest(dir)
+    const zipAbs = /^([a-zA-Z]:)?[\\/]/.test(target) ? target : path.join(dir, target)
+    const passphrase = val('--passphrase') || process.env.DSH_BACKUP_CREDENTIALS_PASSPHRASE || ''
+    const probe = await probeCredentialsPassphrase(zipAbs, passphrase)
+    if (!probe.present) {
+      console.log('这个备份里没有加密凭据库（payload/credentials/.credentials.yaml.enc）。')
+      return
+    }
+    if (probe.ok) {
+      console.log(`✅ 凭据库可解密（明文 ${fmtBytes(probe.bytes)}）。用 restore --force --passphrase <密码> 恢复它。`)
+    } else {
+      console.log(`❌ 凭据库无法解密：${probe.error}`)
+      if (!passphrase) console.log('   可尝试：--passphrase <密码>，或设置环境变量 DSH_BACKUP_CREDENTIALS_PASSPHRASE')
+      process.exitCode = 1
+    }
+    return
+  }
+
   if (cmd === 'restore') {
     let target = argv[1] && !argv[1].startsWith('--') ? argv[1] : null
     if (!target || target === 'latest') target = await pickLatest(dir)
     const zipAbs = /^([a-zA-Z]:)?[\\/]/.test(target) ? target : path.join(dir, target)
     const dryRun = flag('--dry-run')
     const force = flag('--force')
+    const credentialsPassphrase = val('--passphrase') || process.env.DSH_BACKUP_CREDENTIALS_PASSPHRASE || ''
     console.log(`备份：${zipAbs}`)
     console.log(`目标：~/.dsh 与 ~/.mnemon${dryRun ? '（预演，不写入）' : ''} · 模式：${force ? '覆盖（留 .bak）' : '只补缺失文件'}`)
     const r = await rescueRestore(zipAbs, {
-      dryRun, force,
+      dryRun, force, credentialsPassphrase,
       home: val('--home') || undefined,
       mnemonRoot: val('--mnemon') || undefined,
     })
     console.log(`  还原文件 ${r.plan.created.length} 个，覆盖 ${r.plan.replaced.length} 个，保留本机 ${r.plan.keptLocal.length} 个，跳过 ${r.plan.skipped.length} 个`)
+    if (r.plan.credentials.present) {
+      if (r.plan.credentials.restored) console.log('  凭据库 .credentials.yaml：已解密并恢复')
+      else if (r.plan.credentials.reason === 'no-passphrase') console.log('  凭据库 .credentials.yaml：⚠ 未恢复 —— 未提供密码（加 --passphrase <密码>）')
+      else console.log('  凭据库 .credentials.yaml：⚠ 未恢复 —— ' + r.plan.credentials.reason)
+    }
     if (r.plan.replaced.length) {
       console.log('  被覆盖的原文件：')
       for (const x of r.plan.replaced.slice(0, 10)) console.log('   ·', x.bak)
@@ -439,9 +597,19 @@ async function interactive(dir) {
       if (!Number.isInteger(n) || n < 1 || n > all.length) { console.log('无效选择'); continue }
       const zipAbs = path.join(dir, all[n - 1].name)
       const mode = (await ask('模式：【1】只补缺失文件（安全，默认）  【2】覆盖已有文件（留 .bak）  【3】先预览：')).trim() || '1'
-      const r = await rescueRestore(zipAbs, { dryRun: mode === '3', force: mode === '2' }).catch((err) => { console.error('恢复失败：', err.message); return null })
+      let passphrase = process.env.DSH_BACKUP_CREDENTIALS_PASSPHRASE || ''
+      if (!passphrase && await zipHasEncryptedCredentials(zipAbs).catch(() => false)) {
+        console.log('该备份含加密凭据库（.credentials.yaml）。留空则跳过它，本机凭据不受影响。')
+        passphrase = (await ask('凭据库解密密码（注意：输入会显示在屏幕上）：')).trim()
+      }
+      const r = await rescueRestore(zipAbs, { dryRun: mode === '3', force: mode === '2', credentialsPassphrase: passphrase }).catch((err) => { console.error('恢复失败：', err.message); return null })
       if (r) {
         console.log(`  还原 ${r.plan.created.length} · 覆盖 ${r.plan.replaced.length} · 保留本机 ${r.plan.keptLocal.length}`)
+        if (r.plan.credentials.present) {
+          if (r.plan.credentials.restored) console.log('  凭据库：已解密并恢复')
+          else if (r.plan.credentials.reason === 'no-passphrase') console.log('  凭据库：⚠ 未恢复（未提供密码）')
+          else console.log('  凭据库：⚠ 未恢复 —— ' + r.plan.credentials.reason)
+        }
         console.log(mode === '3' ? '预演完成（未写入）。' : '恢复完成。装好 dsh 后启动即可。')
       }
     }

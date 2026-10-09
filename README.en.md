@@ -24,6 +24,8 @@
 - **Auto backup & rotation** — scheduled backups to a local folder with `.sha256` sidecars and keep-N rotation; survives restarts.
 - **`/backup` slash command** — `/backup`, `/backup restore latest --dry-run`, `/backup auto 12`, `/backup doctor` right from the chat.
 - **Credential redaction** — secret-looking values in `settings.yaml` are replaced by placeholders on export; restore keeps your local real values automatically.
+- **Encrypted credential store** — `~/.dsh/.credentials.yaml` (API keys + the connection cookie-signing secret) is a file where *every* line is a secret, so redaction is meaningless for it. Set a passphrase under Settings and it is sealed with AES-256-GCM + scrypt into `payload/credentials/.credentials.yaml.enc`; without a passphrase the component is skipped entirely rather than exported in the clear. The container carries a plaintext sha256, so a wrong passphrase fails *before* your local file is touched.
+- **Editable backup folder & retention** — both are now fields in the settings panel, validated by an actual probe write when you save.
 - **Preview before restore** — a dry-run plan shows exactly what will be added / overwritten / kept, plus missing-plugin detection. All writes go through staging → CRC verification → atomic commit → rollback with `.bak`.
 - **Merge / replace modes** — merge only fills what's missing; replace overwrites matching files (never deletes extras) and keeps `.bak` copies.
 
@@ -43,7 +45,7 @@ Restart `dsh web`, then open **Settings → Backup & Restore** or type `/backup`
 
 ## The DshBackup v1 format
 
-A zip containing `manifest.json` (+ sha256 in `checksums.json`), an optional `redaction.json`, and `payload/` with `sessions/`, `sessions-archive/`, `storages/workspace.json`, `storages/session_projcache/`, `attachments/`, `settings/settings.yaml`, `profile/`, `mnemon/{runtime,documents,data}/`, `extensions/`. Every entry is CRC-verified on import; a higher `formatVersion` is rejected explicitly instead of being applied blindly.
+A zip containing `manifest.json` (+ sha256 in `checksums.json`), an optional `redaction.json`, and `payload/` with `sessions/`, `sessions-archive/`, `storages/workspace.json`, `storages/session_projcache/`, `attachments/`, `settings/settings.yaml`, `credentials/.credentials.yaml.enc`, `profile/`, `mnemon/{runtime,documents,data}/`, `extensions/`. Every entry is CRC-verified on import; a higher `formatVersion` is rejected explicitly instead of being applied blindly.
 
 ## Why mnemon injection stays identical
 
@@ -53,8 +55,11 @@ All injected context comes from three directories under `~/.mnemon`. Replace-res
 
 ```bash
 npm install
-node --test test/local-test.mjs   # core: zip roundtrip, merge semantics, e2e
-node --test test/v02-test.mjs     # v0.2: redaction, doctor, disk backup, rescue console
+node --test test/local-test.mjs        # core: zip roundtrip, merge semantics, e2e
+node --test test/v02-test.mjs          # v0.2: redaction, doctor, disk backup, rescue console
+node --test test/credentials-test.mjs  # v0.6: credential container, encrypted export/restore
+node --test test/route-harness.mjs     # HTTP routes end to end
+node scripts/verify-version.mjs        # the three version sites must agree
 ```
 
 MIT — see [LICENSE](LICENSE). Chinese documentation with full details: [README.md](README.md).

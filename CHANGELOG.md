@@ -38,6 +38,47 @@
 
 _(把下一次改动的条目写在这里,发版时把标题改成版本号与日期)_
 
+## [0.6.0] - 2026-10-09
+
+### 新增
+- **凭据库加密备份(`credentials` 组件,默认开)**:`$DSH_HOME/.credentials.yaml` 是「整文件皆为密钥」的文件(API 密钥 + client-connection 的 cookie 签名密钥),逐行脱敏对它没有意义,因此单独成组件并以 **AES-256-GCM + scrypt**(N=2^15, r=8, p=1, 随机 salt/iv)加密后写入 `payload/credentials/.credentials.yaml.enc`。容器里记录明文 sha256,让「解密是否正确」在覆盖本机文件之前就能被证明。入口:设置 → 备份与恢复 →「凭据加密密码」。零新增依赖(只用 `node:crypto`),新文件 `lib/crypto.js`。
+- **密码缺失时整条跳过,绝不明文落包**:未设置密码时不导出凭据,并把跳过原因写进 manifest(`notices` 与 `components.credentials.skipped`),面板在自动备份完成消息里提示。宁可少备份,不允许「密码没设 → 退化成明文」。
+- **凭据解密恢复**:覆盖导入时解密并原子替换本机 `.credentials.yaml`,原文件保留 `.bak-dshbackup-<时间戳>`,恢复后权限收紧到 `0600`。合并导入跳过该组件(凭据是整文件替换语义,合并两份只会互相覆盖)。
+- **预检试开**:导入预检用当前可用密码试解一次凭据容器,直接报告「密码匹配 / 密码不对 / 未提供密码」,而不是覆盖完才发现。
+- **密码随请求头传递**:`X-Dsh-Backup-Credentials-Passphrase`(UTF-8 + base64)。换机恢复时可在导入卡片临时输入密码,不必写进本机设置;密码不进 URL,避免落进浏览器历史 / Referer / 服务端访问日志。
+- **设置页可直接编辑备份目录**:原「备份目录」是只读展示,现改为输入框 + 「保存目录与保留份数」;保存时先真写一次探针文件,把「盘符打错 / 目录只读 / 没权限」挡在设置阶段。
+- **保留份数可在设置页编辑**(此前只能用 `/backup --keep N`)。
+- **救援控制台支持凭据**:`node rescue.mjs credentials <zip|latest> [--passphrase <密码>]` 只校验不写盘;`restore` 新增 `--passphrase`(或环境变量 `DSH_BACKUP_CREDENTIALS_PASSPHRASE`);交互式菜单在检测到加密凭据时询问密码。无密码或密码错时**跳过**,密文原样留在包里,绝不把密文写成 `.credentials.yaml`。
+- **发布工作流**`.github/workflows/publish.yml`:推 `v*` tag 时自动跑全量测试 → 校验 tag 与版本号一致 → `npm publish --provenance` → 建 GitHub Release(附 tgz 资产);支持手动 dry run(只测试打包不发布)。需要仓库 Secret `NPM_TOKEN`(npm Automation token,否则会卡 EOTP)。新增 `scripts/verify-version.mjs` 校验三处版本号一致,CI 也接入。
+
+### 变更
+- 自动备份的默认组件集合随 `credentials` 组件加入而包含凭据(仍受密码开关约束)。
+- `POST /dsh-backup/settings` 改为白名单 + 校验:`keep` 必须是 1..1000 整数、`destination` 必须是绝对路径、凭据密码至少 8 位。此前请求体被直接 merge 进配置文件,任何键、任何值都能写进去。
+- `GET /dsh-backup/settings` 不再返回密码明文,改为 `credentialsPassphraseSet` / `credentialsPassphraseLength` / `credentialsMinLength`。此前 `cfgGet()` 结果原样进 JSON,明文密码会被发到浏览器并留在页面内存里。
+- `GET /dsh-backup/disk` 增加 `defaultDestination` 与 `credentialsPassphraseSet`,供面板显示。
+- `test/local-test.mjs` 的 `exportBackup` 改为直接调用 `assembleBackupZip`,不再复刻一份打包逻辑——复刻版会绕过导出侧的改动(脱敏 / 凭据加密),测试就白跑了。
+- CI 补齐此前漏跑的 `test/route-harness.mjs`,并纳入新的 `test/credentials-test.mjs`。
+- `README.md` 同步更新:组件表新增凭据库行、新增「🔑 凭据库加密」章节、救援通道补 `credentials` 与 `--passphrase`、备份格式补 `payload/credentials/`、FAQ 补「忘了密码怎么办」,并修正 Profile 插件清单一栏里写死的 `profiles/web/`。
+
+### 修复
+- **改了备份目录后自动备份会静默停摆 → 根因:自动备份开关状态存在备份目录内的 `.dsh-backup-auto.json`,而 `rescheduleAuto()` 从「当前目录」读取该文件。换目录后新目录里没有这个文件,`readAutoState()` 返回 `{}`,`hours` 取到 0 便直接 `return`(不注册定时器)。** 只要在下一次触发前重启过 dsh 就会中招,而且界面上只显示「关闭」,不报任何错。修法:`POST /settings` 检测到 `destination` 变化时,把旧目录的自动备份状态迁到新目录并重新排程;若旧目录本就没有状态(如首次设置),面板明确提示需要重新点「开启自动备份」。
+- **`dsh-backup-settings.json` 会被 `extensions` 动态组件扫进备份包 → 根因:`dynamicExtensionSources()` 的 `known` 排除集只列了 `.` 开头的条目与几个已知目录名,该文件名不以 `.` 开头,于是被当作「第三方插件数据」。** 0.6.0 起该文件存放凭据加密密码,一旦被扫进包就等于密码与密文同包,加密形同虚设。修法:把 `.credentials.yaml` 与 `dsh-backup-settings.json` 加入 `known` 排除集,并补测试断言整包里不允许出现这两个文件名。
+- **`rescue.mjs --dry-run` 会把整个备份解包到暂存区且从不清理 → 根因:预演分支在 `writeFile(staged, …)` 之后才 `continue`,而清理暂存区的代码被 `if (!dryRun)` 包住。** 预演本应零写入,实际却在 `~/.dsh/.dsh-backup-staging/` 留下一份完整解包数据;救援场景下 dsh 已经停了,没有 `cleanupStale` 来收尾。修法:预演在读取条目并判定目标后直接 `continue`,不创建暂存目录、不落任何字节。
+- **双击「点我恢复」找不到备份 → 根因:救援控制台的 `defaultBackupDir()` 还在找 `~/Desktop/dsh-backups`,而 0.3.1 已把插件的默认落点改成 `~/Documents/dsh-backups`,本文件当时漏改。** 于是救援工具会报「目录里没有备份」——偏偏这是最需要它工作的时刻。修法:救援端按「文档 → 桌面 → 主目录」顺序探测,优先返回真正存在备份的目录,并在都没有备份时回落到与插件一致的默认值;补回归测试断言两侧一致。
+- **救援控制台把插件清单硬编码还原到 `profiles/web` → 根因:`destFor()` 的 profile 分支写死 `'web'`,违反仓库硬性禁忌 8(新一代 Electron 桌面端用 `desktop` profile)。** 在桌面端做救援恢复会凭空造出一个 `profiles/web/` 目录。修法:改用 `process.env.DSH_PROFILE || 'web'`,与 `resolveProfileName()` 的回落规则一致。
+
+### 兼容
+- 备份格式仍为 **DshBackup v1**(`formatVersion` 不变)。新增的 `payload/credentials/` 对旧版插件属未知子目录,按既有约定「忽略并告警」,不会导致导入失败;反向(旧包进新插件)同理,凭据组件报 `notInBackup`。
+- 新增设置键 `credentialsPassphrase`,旧配置文件缺该键时回落空字符串(即凭据组件跳过),行为与 0.5.0 一致——升级后不会突然开始往包里塞东西。
+- 需要 Node ≥ 20(沿用);`engines.dsh` 仍为 `>=0.1.1-rc.2`。
+- 面板新增的凭据密码输入框为 `type="password"`;`GET /settings` 永不回传密码,因此面板永远显示「已设置 / 未设置」而不回填。
+
+## [0.5.0] - 2026-09-30
+
+### 兼容
+- **适配新一代 Electron 桌面端(desktop profile)**(补记:该版本发布时漏写本文件,条目据提交 8ff28bf 追记):profile 名不再硬编码 `web`,改为 `DSH_PROFILE` 环境变量 → `--profile` 参数 → 回落 `web`;新版桌面端(`DeepSeek Harness.exe`)使用 `desktop` profile,旧的 `web` profile 在那边已不存在,因此 profile 组件的备份/恢复落点跟随运行进程。
+- manifest 与 `/status` 记录 profile 名,便于跨 profile 诊断。
+
 ## [0.4.0] - 2026-09-26
 
 ### 兼容
@@ -98,7 +139,9 @@ _(把下一次改动的条目写在这里,发版时把标题改成版本号与�
 - **安全**:暂存区 + 逐文件 CRC32 校验 + manifest sha256 + 原子提交 + 失败回滚,被替换文件保留 `.bak-dshbackup-<时间戳>`;formatVersion 更新的备份明确拒绝
 - **兼容**:payload 未知子目录忽略并告警;跨 Windows / macOS / Linux;仅依赖 schemastery
 
-[未发布]: https://github.com/having5548/dsh-backup/compare/v0.4.0...HEAD
+[未发布]: https://github.com/having5548/dsh-backup/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/having5548/dsh-backup/releases/tag/v0.6.0
+[0.5.0]: https://github.com/having5548/dsh-backup/releases/tag/v0.5.0
 [0.4.0]: https://github.com/having5548/dsh-backup/releases/tag/v0.4.0
 [0.3.1]: https://github.com/having5548/dsh-backup/releases/tag/v0.3.1
 [0.3.0]: https://github.com/having5548/dsh-backup/releases/tag/v0.3.0

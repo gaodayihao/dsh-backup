@@ -85,7 +85,8 @@ dsh plugin --profile web add having5548-dsh-backup-<版本>.tgz
 | 会话投影缓存 | `storages/session_projcache/`，可再生，加速恢复后首次打开 | ✅ |
 | 附件 | 对话中引用的图片 / 文件（`~/.dsh/attachments/`） | ✅ |
 | 设置 | `settings.yaml`，各插件设置（**可能含 API 密钥，请妥善保管备份**） | ✅ |
-| Profile 插件清单 | `profiles/web/` 的 package.json 与 patch 文件；导入时仅补缺并生成缺失插件报告 | ✅ |
+| **凭据库** | `~/.dsh/.credentials.yaml`（API 密钥 + 登录签名密钥），整文件皆为密钥，**AES-256-GCM 加密后才入包**；未设密码则整条跳过并写明原因 | ✅ |
+| Profile 插件清单 | `profiles/<profile>/` 的 package.json 与 patch 文件；导入时仅补缺并生成缺失插件报告 | ✅ |
 | dsh-mnemon 记忆数据 | `~/.mnemon/{runtime, documents, data[, state]}`，上下文注入的全部来源 | ✅ |
 | 其他插件数据 | task-board / dsh-usage / skins 等第三方插件的数据目录（动态发现） | ⬜ |
 
@@ -99,6 +100,7 @@ dsh plugin --profile web add having5548-dsh-backup-<版本>.tgz
 | mnemon 文档 | 同 id 同 contentHash 跳过；同 id 异内容换新 id 导入 | 按备份原样还原 |
 | mnemon 记忆体（SQLite） | 仅新增 body，已有 body 一律保留本机 | 全量替换（先清 `-wal`/`-shm`，防旧 WAL 配新库） |
 | settings.yaml | 跳过（想覆盖请用覆盖模式） | 整体替换 |
+| 凭据库 `.credentials.yaml` | 跳过（整文件替换语义，合并两份凭据只会互相覆盖） | 解密后整体替换（原文件留 `.bak`，权限收紧到 `0600`） |
 | 被替换的原文件 | — | 保留为 `*.bak-dshbackup-<时间戳>`，可随时手动还原 |
 
 ## 🛟 救援通道（DSH 起不来时）
@@ -110,10 +112,17 @@ node rescue.mjs list                              # 列出备份
 node rescue.mjs verify dsh-backup-xxx.zip         # 逐条目 CRC 校验
 node rescue.mjs restore latest --dry-run          # 预览（默认只补缺失文件，绝不覆盖）
 node rescue.mjs restore latest --force            # 覆盖恢复（原文件留 *.bak-rescue-*）
+node rescue.mjs credentials latest                # 只校验加密凭据库能否解开，不写盘
+node rescue.mjs restore latest --force --passphrase '你的密码'   # 连凭据库一起恢复
 ```
 
 Windows 双击「点我恢复.bat」、macOS 双击「点我恢复.command」进入交互式菜单。
 也可以在设置面板点「下载救援工具包」把它和备份放在一起。
+
+> `rescue.mjs` 默认按「文档 → 桌面 → 主目录」顺序找备份目录，优先选真正有备份的那个；
+> 密码也可用环境变量 `DSH_BACKUP_CREDENTIALS_PASSPHRASE` 提供。
+> 没有密码或密码不对时，凭据库会被**跳过**（密文原样留在包里），本机凭据不受影响——
+> 它绝不会把一个 dsh 读不了的密文写成 `.credentials.yaml`。
 
 ## 🔐 凭据脱敏
 
@@ -121,11 +130,24 @@ Windows 双击「点我恢复.bat」、macOS 双击「点我恢复.command」进
 - 覆盖导入时，占位符处自动回填**本机现值**（本机没有的保留占位符并在报告中提示重填）——换机恢复后无需担心密钥互相覆盖
 - 需要明文备份（如本机冷存档）可在导出时取消勾选
 
+## 🔑 凭据库加密（`.credentials.yaml`）
+
+`~/.dsh/.credentials.yaml` 是 dsh 自己的凭据库（5 个 API 密钥 + `client-connection` 的 cookie 签名密钥），**整个文件每一行都是密钥**——逐行脱敏对它没有意义。所以它不走脱敏，走对称加密：
+
+- 在 **设置 → 备份与恢复 →「凭据加密密码」** 设置密码后，凭据库以 **AES-256-GCM + scrypt**（N=2^15, r=8, p=1，每次随机 salt/iv）加密写入 `payload/credentials/.credentials.yaml.enc`
+- 容器里记录了明文 sha256，因此**解密结果可被证明**：密码不对、密文被改一个字节都会在**覆盖本机文件之前**失败，不会出现「覆盖完才发现打不开」
+- **未设置密码时该组件整条跳过**，并在 manifest 里写明原因。明文凭据在任何情况下都不会进入备份包
+- 覆盖导入时解密恢复，原文件保留 `.bak-dshbackup-<时间戳>`，恢复后权限收紧到 `0600`；合并导入跳过（凭据是整文件替换语义）
+- **换机恢复**：本机没有那份备份的密码时，在导入卡片的「凭据库解密密码」里临时填写即可。密码走请求头（UTF-8 + base64），**不进 URL**（避开浏览器历史、Referer、服务端访问日志），也不写入本机设置
+- 密码保存在本机 `~/.dsh/dsh-backup-settings.json`，而**该文件已被排除在备份之外**（否则密码与密文同包，加密形同虚设）。请务必把密码另存到密码管理器——机器全损时它是打开备份里凭据的唯一钥匙
+
 ## ⏰ 自动备份
 
 - `/backup auto 12`：每 12 小时一次（1–720），重启 dsh 后自动续跑，不中断
+- **备份目录与保留份数都能在面板里直接编辑**：「设置 → 备份与恢复 → 备份目录 / 保留 N 份 → 保存」。保存时会先真写一次探针文件，盘符打错或目录不可写会当场报错，而不是等到备份时才发现
+- 改备份目录时，自动备份状态会自动迁移到新目录并重新排程（否则新目录里没有 `.dsh-backup-auto.json`，重启后自动备份会静默停摆）
 - 每份备份：`dsh-backup-<时间戳>.zip` + 同名 `.sha256`（sha256sum 格式）+ 救援工具
-- 保留策略：默认保留最近 7 份（`/backup --keep N` 或面板设置），超出自动轮换删除
+- 保留策略：默认保留最近 7 份（面板或 `/backup --keep N`），超出自动轮换删除
 
 ## 🧠 为什么 dsh-mnemon 上下文注入能「跟原本一样」
 
@@ -168,6 +190,7 @@ payload/
   storages/session_projcache/…             ← 投影缓存
   attachments/…                            ← 附件
   settings/settings.yaml                   ← 设置（默认已脱敏）
+  credentials/.credentials.yaml.enc        ← 凭据库（AES-256-GCM + scrypt；密码缺失时整条不出现）
   profile/…                                ← 插件清单（package.json / cordis.patch.yml / …）
   mnemon/{runtime,documents,data}/…        ← dsh-mnemon 数据
   extensions/<插件数据>/…                   ← 其它插件数据
@@ -179,7 +202,10 @@ payload/
 ## ❓ FAQ
 
 **Q: 备份文件里有没有敏感信息？**
-默认没有。导出与自动备份默认**脱敏** `settings.yaml` 中的密钥值（明文不出包）；会话内容当然在备份里。若手动取消脱敏选项，备份即明文，请像保管密钥一样保管备份文件。
+默认没有。导出与自动备份默认**脱敏** `settings.yaml` 中的密钥值（明文不出包），`.credentials.yaml` 则在设置密码后以 AES-256-GCM 加密入包（未设密码时干脆不导出）。会话内容当然在备份里。若手动取消脱敏选项，`settings.yaml` 即明文，请像保管密钥一样保管备份文件——**但凭据库即使取消脱敏也仍然是密文**，它只有「加密」和「不导出」两种状态。
+
+**Q: 我忘了凭据加密密码怎么办？**
+备份里的 `.credentials.yaml` 就解不开了（scrypt + AES-256-GCM 没有后门）。但这不等于丢失：本机的 `.credentials.yaml` 还在，dsh 照常能用；只是这份备份无法用于「换机恢复凭据」。删掉重设密码重新备份即可。**所以请把密码记进密码管理器**。
 
 **Q: 老版本 dsh 产生的会话，新版 harness 里能用吗？**
 能。会话文件按字节复制，打开时由 harness 自带的 v0→v1→v2→v3 迁移链自动升级——这正是 dsh-backup 不解包会话的原因：无论会话格式怎么演进，备份侧永远兼容。

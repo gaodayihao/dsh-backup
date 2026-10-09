@@ -21,9 +21,15 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Install dependencies
         run: npm install --no-audit --no-fund
+      - name: 版本号一致性
+        run: node scripts/verify-version.mjs
       - name: Syntax check
-        run: node --check lib/index.js && node --check lib/store.js && node --check lib/zip.js && node --check lib/client.js && node --check lib/backupdir.js && node --check rescue/rescue.mjs
+        run: node --check lib/index.js && node --check lib/store.js && node --check lib/crypto.js && node --check lib/zip.js && node --check lib/client.js && node --check lib/backupdir.js && node --check rescue/rescue.mjs
       - name: Unit & e2e tests (core)
         run: node --test test/local-test.mjs
       - name: Unit & e2e tests (v0.2 features)
         run: node --test test/v02-test.mjs
+      - name: Unit & e2e tests (credentials)
+        run: node --test test/credentials-test.mjs
+      - name: HTTP route harness
+        run: node --test test/route-harness.mjs

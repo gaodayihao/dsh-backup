@@ -24,7 +24,7 @@ import {
   FORMAT_VERSION, resolveLayout, collectExportFiles, buildManifest,
   classifyZipPath, destForComponent, mergeWorkspaceRegistries,
   mergeMemoriesJson, mergeDocumentsIndex, planImport, extractPayload,
-  applyImport, cleanupStale, COMPONENTS,
+  applyImport, cleanupStale, COMPONENTS, assembleBackupZip,
 } from '../lib/store.js'
 // ---------------------------------------------------------------------------
 // 工具
@@ -92,23 +92,19 @@ function makeFakeHome(root, name) {
   }
 }
 
-/** 导出 → zip Buffer（与 index.js handleExport 同一条代码路径）。 */
-async function exportBackup(layout, componentIds) {
-  const components = new Set(componentIds)
-  const { files, componentStats } = await collectExportFiles(layout, components)
-  const manifest = await buildManifest(layout, [...components], componentStats)
+/**
+ * 导出 → zip Buffer。
+ * 直接走 assembleBackupZip（与 index.js handleExport 同一条代码路径），
+ * 不再在这里复制一份打包逻辑——否则导出侧的改动（脱敏/凭据加密）会被测试绕过。
+ */
+async function exportBackup(layout, componentIds, opts = {}) {
   const chunks = []
   const sink = { async write(c) { chunks.push(c) } }
-  const writer = new ZipWriter(sink)
-  const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2), 'utf8')
-  const h = crypto.createHash('sha256')
-  h.update(manifestBytes)
-  const checksums = { algorithm: 'zip-entry-crc32 + manifest-sha256', manifest: h.digest('hex'), files: {} }
-  for (const f of files) checksums.files[f.zipPath] = { size: f.size }
-  await writer.addBuffer('manifest.json', manifestBytes)
-  for (const f of files) await writer.addFromFile(f.abs, f.zipPath, { mtime: f.mtime })
-  await writer.addBuffer('checksums.json', Buffer.from(JSON.stringify(checksums, null, 2), 'utf8'))
-  await writer.close()
+  const { manifest } = await assembleBackupZip(layout, new Set(componentIds), {
+    sink,
+    redactSecrets: false,
+    ...opts,
+  })
   return { zip: Buffer.concat(chunks), manifest }
 }
 

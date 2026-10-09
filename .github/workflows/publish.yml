@@ -1,0 +1,75 @@
+name: Publish
+
+# 发布流程（AGENTS.md「版本与发布清单」的自动化部分）：
+#   1. 本地把三处版本号同步好、CHANGELOG 的 [未发布] 改成 [x.y.z]
+#   2. git tag vX.Y.Z && git push origin vX.Y.Z
+#   3. 本工作流跑全量测试 → 校验 tag 与版本号一致 → npm publish → 建 GitHub Release
+#
+# 需要仓库 Secret：NPM_TOKEN（npm 的 Automation token，绕过 2FA）。
+# 没有它时 tag 推送会在发布那一步失败，测试步骤仍然照常执行。
+#
+# 也可以手动触发（Actions → Publish → Run workflow）做一次 dry run：
+# 只跑测试并 npm pack，不发布。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只跑测试并打包，不发布'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # 创建 GitHub Release
+  id-token: write # npm provenance（--provenance）
+
+jobs:
+  publish:
+    name: 测试 → 校验 → 发布
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      # ---- 先跑全绿再谈发布：一个坏包发出去比不发更糟 ----
+      - name: 版本号一致性
+        run: node scripts/verify-version.mjs
+      - name: Syntax check
+        run: node --check lib/index.js && node --check lib/store.js && node --check lib/crypto.js && node --check lib/zip.js && node --check lib/client.js && node --check lib/backupdir.js && node --check rescue/rescue.mjs
+      - name: Unit & e2e tests (core)
+        run: node --test test/local-test.mjs
+      - name: Unit & e2e tests (v0.2 features)
+        run: node --test test/v02-test.mjs
+      - name: Unit & e2e tests (credentials)
+        run: node --test test/credentials-test.mjs
+      - name: HTTP route harness
+        run: node --test test/route-harness.mjs
+
+      - name: 校验 tag 与版本号一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/verify-version.mjs "${GITHUB_REF_NAME}"
+
+      - name: 打包（tgz 既用于发布，也作为 Release 资产）
+        run: npm pack
+
+      # npm 的 2FA：CI 里必须用 Automation token（在 npm 后台生成时勾选
+      # "Automation"），否则会卡在 EOTP。详见 AGENTS.md 发布清单第 6 条。
+      - name: 发布到 npm
+        if: startsWith(github.ref, 'refs/tags/v') && github.event.inputs.dry_run != 'true'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 创建 GitHub Release（附 tgz 资产）
+        if: startsWith(github.ref, 'refs/tags/v') && github.event.inputs.dry_run != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: having5548-dsh-backup-*.tgz
+          generate_release_notes: true

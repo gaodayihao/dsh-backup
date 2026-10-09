@@ -306,9 +306,37 @@ test('rotateBackups：keep 之外的旧备份连同 sidecar 一起删除', async
   }
 })
 
-test('defaultBackupDir：有 Desktop 用 Desktop，否则回落主目录', () => {
-  const d = defaultBackupDir()
-  assert.ok(d.endsWith('dsh-backups'))
+test('defaultBackupDir：插件与救援控制台必须一致（否则双击「点我恢复」找不到备份）', async () => {
+  const { defaultBackupDir: rescueDefault } = await import('../rescue/rescue.mjs')
+  const root = tmpRoot()
+  const prevUser = process.env.USERPROFILE
+  const prevHome = process.env.HOME
+  try {
+    // os.homedir() 在 Windows 读 USERPROFILE，在 POSIX 读 HOME —— 两个都伪造
+    process.env.USERPROFILE = root
+    process.env.HOME = root
+    const docsBackups = path.join(root, 'Documents', 'dsh-backups')
+    fs.mkdirSync(docsBackups, { recursive: true })
+    fs.mkdirSync(path.join(root, 'Desktop'), { recursive: true })
+
+    assert.equal(defaultBackupDir(), docsBackups, '插件默认落点应是「文档」')
+    assert.equal(rescueDefault(), docsBackups, '没有备份时救援控制台应回落到与插件相同的位置')
+
+    // 备份真的落在「文档」：救援控制台必须能找到（0.3.1 改默认位置时这里漏改过）
+    fs.writeFileSync(path.join(docsBackups, 'dsh-backup-20260101-000000.zip'), 'x')
+    assert.equal(rescueDefault(), docsBackups)
+
+    // 历史遗留：只有桌面目录有备份时，救援控制台仍应找到它
+    fs.rmSync(docsBackups, { recursive: true, force: true })
+    const deskBackups = path.join(root, 'Desktop', 'dsh-backups')
+    fs.mkdirSync(deskBackups, { recursive: true })
+    fs.writeFileSync(path.join(deskBackups, 'dsh-backup-20260101-000000.zip'), 'x')
+    assert.equal(rescueDefault(), deskBackups)
+  } finally {
+    if (prevUser === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevUser
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })
 
 // ---------------------------------------------------------------------------
