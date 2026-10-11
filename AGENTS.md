@@ -12,8 +12,9 @@
 
 > **本仓库是 [having5548/dsh-backup](https://github.com/having5548/dsh-backup) 的 fork,不发布到 npm。**
 > 上游包名 `@having5548/dsh-backup` 属于原作者的 npm scope,本仓库无权 `npm publish`(会 403)。
-> 分发渠道是 GitHub Release,DSH 里用 Release 的 tgz 安装;包名沿用原值,
-> 因此安装本 fork 的 tgz 会**覆盖** profile 里同名的上游插件。
+> 分发渠道是 GitHub 仓库本身(主推 `dsh plugin add github:gaodayihao/dsh-backup`),
+> GitHub Release 的 tgz 作为「本机没有 `git`」时的备选;包名沿用原值,
+> 因此安装本 fork 会以同名依赖**覆盖** profile 里同名的上游插件。
 > 将来若要发 npm,先把 `package.json` 的 `name` 改成自己拥有的 scope。
 
 ## 代码地图
@@ -63,9 +64,10 @@
      && node --test test/credentials-test.mjs && node --test test/route-harness.mjs
    ```
 3. 按「变更记录规则」更新 `CHANGELOG.md`
-4. `npm pack` → 把 tgz 装进本地 profile 验证加载(需把 `H:\DeepSeek Harness\resources\runtime` 加入 PATH 供 pnpm 使用):
+4. `npm pack` → 把 tgz 装进本地 profile 验证加载(桌面端用捆绑 CLI 即可,不用配 PATH;
+   旧 CLI 环境才需要把 `<DSH 安装根>\resources\runtime` 加进 PATH 供 pnpm 使用):
    ```bash
-   node "H:/DeepSeek Harness/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --profile web add <tgz>
+   "<DSH 安装根>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add having5548-dsh-backup-<版本>.tgz
    ```
 5. `git tag vX.Y.Z && git push origin vX.Y.Z` —— 推 tag 后 `.github/workflows/publish.yml` 会自动
    跑全量测试 → 校验 tag 与版本号一致 → `npm pack` → 建 GitHub Release。
@@ -75,6 +77,14 @@
    `releases/latest/download/having5548-dsh-backup.tgz` 那个地址依赖它,
    **不要只留版本化的那个**——`latest/download/<名>` 要求资产名与 URL 完全一致)。
    重跑同一个 tag 用 `gh release upload --clobber`,workflow 已按可重跑写好。
+
+> **安装方式策略(2026-10 起)**:对外主推 `dsh plugin add github:<owner>/<repo>`,Release tgz 只作
+> 「用户本机没有 `git`」时的备选。原因:pnpm ≤ 11.8(含 DSH 桌面端内置的 11.7.0)对「直接用 URL
+> 指定的 tgz 依赖」有 `ERR_PNPM_MISSING_TARBALL_INTEGRITY` 缺陷——store 已缓存该 tarball 时解析
+> 阶段不再下载,写出的锁文件条目缺 `integrity`,随后又被同一条硬校验判死(上游 pnpm/pnpm#12185,
+> 11.9.0 修复);而 **git 托管依赖被该硬校验显式豁免**,`github:` 形式不受影响。
+> **别把 README 的首选安装命令改回 tgz URL**;Release 仍要同时挂版本化与固定名两个资产
+> (固定名那个 URL 作为备选仍在被使用)。细节与实测数据见 `CHANGELOG.md` 的 `[未发布]`「变更」条。
 
 ## 变更记录规则(必须执行)
 
@@ -87,8 +97,10 @@
 
 ## 本地环境备忘
 
-- 桌面端捆绑运行时(含 pnpm):`H:\DeepSeek Harness\resources\runtime\`
-- dsh 本体安装根:`H:\DeepSeek Harness\`(宿主升级会整体替换)
+- 桌面端捆绑运行时(含 pnpm):`<DSH 安装根>\resources\runtime\`——本仓库开发机是
+  `D:\Program Files\DeepSeek Harness\`,另一台是 `H:\DeepSeek Harness\`,按实际机器选
+- dsh 本体安装根:同上(宿主升级会整体替换)。桌面端免配 PATH 的入口是
+  `<DSH 安装根>\resources\runtime\cli\bin\dsh.cmd`
 - dsh 数据目录:`~/.dsh`(会话/工作区/设置);mnemon 数据:`~/.mnemon`
 - 本地安装调试:profile 以 `file:` tgz 依赖方式安装;profile 的 `package.json` 里若引用了
   本地 tgz 路径,记得 `npm pack` 后保持文件名一致

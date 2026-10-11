@@ -38,6 +38,20 @@
 
 _(把下一次改动的条目写在这里,发版时把标题改成版本号与日期)_
 
+### 变更
+
+- **分发方式的主推安装命令从 Release tgz 改为 `github:` 直装**:README「📦 安装」首选 `dsh plugin --profile desktop add github:gaodayihao/dsh-backup`,Release tgz 降为「本机没有 `git`」时的备选(固定名资产**继续保留**)。理由是 pnpm(含 DSH 桌面端内置的 11.7.0)对「直接用 URL 指定的 tgz 依赖」存在 `ERR_PNPM_MISSING_TARBALL_INTEGRITY` 缺陷(见下方修复条目),而 **git 托管依赖被该硬校验显式豁免**,`github:` 形式在同一场景下稳定通过。实测依据:同一台机器,`github:` 在「干净目录 + store 已缓存」这个专杀 tgz 的场景下 exit 0;两种装法产出的 **12 个文件 sha256 逐个相同**(pnpm 对 git 依赖同样按 `files` 白名单重新打包,`.github/` `test/` `AGENTS.md` 不会进 `node_modules`);`github:…#v0.6.0` 可钉版本(解析到同一 commit);该仓库无任何 `scripts`,不会触发 pnpm 11 的构建脚本审批拦截。代价与不变量:用户本机需要 `git`(pnpm 用 `git ls-remote` 解析 ref;实测把 git 从 PATH 摘掉后 `github:` 直接失败、而 tgz 装法不受影响),故 Release 通道与固定名 `having5548-dsh-backup.tgz` 资产**继续保留**。
+- `README.md` 与 `README.en.md` 的安装章节都改为**主推 `github:`**、tgz 降级为备选(profile 名说明统一成「桌面端 `desktop` / 旧版 CLI `web`」,首选命令示例改用 `--profile desktop`);`AGENTS.md` 同步:新增「安装方式策略」段(含「别把首选安装命令改回 tgz URL」这条红线)、`项目是什么` 里的分发描述改为主推 `github:`,并把「本地环境备忘 / 发布清单」里写死的 `H:\DeepSeek Harness\` 换成 `<DSH 安装根>`(本机是 `D:\Program Files\DeepSeek Harness\`,另一台才是 `H:\`)、给出桌面端免配 PATH 的 `resources\runtime\cli\bin\dsh.cmd` 入口。
+
+### 修复
+
+- **在 DSH 桌面端从 GitHub Release 安装:同一台机器上第一次装成功、之后每次装都报 `[ERR_PNPM_MISSING_TARBALL_INTEGRITY]`** → 根因分三层,且**全部在 pnpm 一侧,与本插件代码无关**(上游 [pnpm#12185](https://github.com/pnpm/pnpm/issues/12185),已在 pnpm ≥ 11.9.0 修复;DSH 桌面端当前内置 pnpm 11.7.0):
+  1. **解析层**:`resolveFromTarball()`(pnpm 的 `dist/pnpm.mjs`)对 `https:` 直接指定的 tgz 依赖只返回 `resolution: {tarball: url}`,**从不产生 `integrity`**——integrity 本应由「把 tarball 下载进 store」这一步补上。
+  2. **store 复用层**:当该 tarball 已在本地 store 里(`<store>/v11/index.db` 的 `package_index` 表存在 `key` 为 `<url>` + `\tbuilt` 的一行)时,解析阶段标记为 `reused` 而不再下载,于是写进 `pnpm-lock.yaml` 的包条目就是 `resolution: {tarball: <url>}`,**缺 `integrity`**。
+  3. **校验层**:同一次运行紧接着用 `pkgSnapshotToResolution()` 读回该条目,其守卫要求「`type` 为空、非 `file:`、非 `gitHosted` 的 tarball 依赖必须有 `integrity`」,于是 pnpm 自己刚写下的条目把自己判死。
+  现象之所以是「第一次成功、之后必失败」:干净 store 的首装会真正下载并算出 integrity;而 store 已被写脏后再也无法重新走下载路径。`pnpm store prune` **修不了**(它清理的是包,不是这行 URL 索引)。附带影响:失败前 pnpm 已把无 `integrity` 的条目写进 profile 的 `pnpm-lock.yaml`,之后每次安装会**立刻**失败;而 `file:` 形式的 tgz 依赖被该守卫显式豁免。
+  **修法**:README「📦 安装」下新增「装不上?报 `ERR_PNPM_MISSING_TARBALL_INTEGRITY`」小节,写清两种可用修法(删掉 `index.db` 中该 URL 的索引行后重跑安装;或用 `curl` 落地成本地 tgz 后以 `file:` 形式安装)、`pnpm store prune` 无效、以及「锁文件里残留的无 `integrity` 条目必须先删除或补上 `integrity`」。**插件代码零改动,无需重新发版。**
+
 ## [0.6.0] - 2026-10-09
 
 ### 新增

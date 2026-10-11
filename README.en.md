@@ -33,17 +33,24 @@
 
 > This repository is a fork of [having5548/dsh-backup](https://github.com/having5548/dsh-backup).
 > **It is not published to npm** — the package name `@having5548/dsh-backup` belongs to the
-> original author's npm scope, which this fork cannot publish to. Distribution is via GitHub
-> Releases. The package name is kept as-is, so installing this fork's tgz **replaces** the
+> original author's npm scope, which this fork cannot publish to. Distribution is via the GitHub
+> repository itself. The package name is kept as-is, so installing this fork **replaces** the
 > existing plugin under the same dependency name in your profile.
 
 ```bash
-# from the latest GitHub Release (this fork):
+# recommended — straight from the GitHub repo (follows main; the lockfile pins the commit):
+dsh plugin --profile desktop add github:gaodayihao/dsh-backup
+
+# fallback — only for machines without git: install the Release tarball instead
+# (if it fails with ERR_PNPM_MISSING_TARBALL_INTEGRITY, see the note in README.md):
 dsh plugin --profile web add https://github.com/gaodayihao/dsh-backup/releases/latest/download/having5548-dsh-backup.tgz
+
 # or local build:
 npm pack                                   # build having5548-dsh-backup-<version>.tgz
 dsh plugin --profile web add having5548-dsh-backup-<version>.tgz
 ```
+
+> The profile name depends on the front end: the **desktop app uses `desktop`**, the older CLI uses `web`.
 
 Restart `dsh web`, then open **Settings → Backup & Restore** or type `/backup`.
 

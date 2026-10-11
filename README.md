@@ -28,10 +28,20 @@
 
 > 本仓库是 [having5548/dsh-backup](https://github.com/having5548/dsh-backup) 的 fork。
 > **本 fork 不发布到 npm**（上游包名 `@having5548/dsh-backup` 属于原作者的 npm scope，
-> 本仓库无权 publish），分发渠道是 GitHub Release。包名沿用 `@having5548/dsh-backup`，
-> 因此安装本 fork 的 tgz 会以同名依赖**覆盖** profile 里原有的那个插件。
+> 本仓库无权 publish），分发渠道是 GitHub 仓库本身。包名沿用 `@having5548/dsh-backup`，
+> 因此安装本 fork 会以同名依赖**覆盖** profile 里原有的那个插件。
 
-从 GitHub Release 安装：
+**推荐：从 GitHub 仓库直装**（跟随 `main`，锁文件会把当时的 commit 钉住）
+
+```bash
+dsh plugin --profile desktop add github:gaodayihao/dsh-backup
+```
+
+- 只要求本机装了 `git`（pnpm 要用 `git ls-remote` 解析 ref）。
+- 想钉死某一版：`github:gaodayihao/dsh-backup#v0.6.0`。
+- 与下面 Release tgz 装出来的文件**逐字节相同**（pnpm 会按 `package.json` 的 `files` 白名单重新打包，不会把 `.github/`、`test/` 带进 `node_modules`）。
+
+**备选：从 GitHub Release 装 tgz**（本机没有 `git` 时用；但要留意下面那条 `ERR_PNPM_MISSING_TARBALL_INTEGRITY`）
 
 ```bash
 dsh plugin --profile web add https://github.com/gaodayihao/dsh-backup/releases/latest/download/having5548-dsh-backup.tgz
@@ -44,7 +54,62 @@ npm pack          # 得到 having5548-dsh-backup-<版本>.tgz
 dsh plugin --profile web add having5548-dsh-backup-<版本>.tgz
 ```
 
+> profile 名按前端来：**桌面端是 `desktop`**，旧版 CLI 是 `web`。
+
 安装后**重启服务**（桌面端工具栏「重新连接服务」），打开 **设置 → 备份与恢复**。
+
+### 装不上？报 `ERR_PNPM_MISSING_TARBALL_INTEGRITY`
+
+> 这条**只跟上面「从 Release 装 tgz」那种装法有关**。想直接绕开，改用
+> `dsh plugin --profile desktop add github:gaodayihao/dsh-backup` 即可（`github:` 形式不受影响）。
+
+现象（tgz 装法）：**同一台机器上第一次装能成功，之后每次装**（重装 / 换版本 / 装进另一个 profile）都失败：
+
+```
+[ERR_PNPM_MISSING_TARBALL_INTEGRITY] Cannot install package "@having5548/dsh-backup@https://github.com/…/having5548-dsh-backup.tgz":
+its lockfile entry has no "integrity" field, so pnpm cannot verify the downloaded tarball.
+```
+
+根因是 **pnpm 自己的 bug，与本插件无关**（上游 [pnpm#12185](https://github.com/pnpm/pnpm/issues/12185)，已在 **pnpm ≥ 11.9.0** 修复；DSH 桌面端目前内置的是 pnpm 11.7.0，会踩到）：
+
+- pnpm ≤ 11.8 解析「**直接用 URL 指定的 tgz 依赖**」时只产出 `{tarball: <url>}`，**不带 integrity**——integrity 本来要靠「把它下载进本地 store」这一步补上；
+- 如果这个 tarball 已经在本地 store 里（`%LOCALAPPDATA%\pnpm\store\v11\index.db` 中有 `key` 形如 `<url>` + `\tbuilt` 的一行），解析阶段就直接 `reused`、不再下载，于是写进 `pnpm-lock.yaml` 的条目**没有 integrity**；
+- pnpm 紧接着又用「非 git 托管、非 `file:` 的 tarball 依赖必须有 integrity」这条硬规则读回同一个条目，于是自己刚写下的条目把自己判死。
+
+**修法一（推荐，保留 URL 依赖声明）**：清掉 store 里那行索引，再重跑安装命令。
+
+```powershell
+# 需要 Node 22+ 的 node:sqlite（DSH 自带 24.x）；先备份 index.db 更稳妥
+@'
+const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync(process.env.LOCALAPPDATA + "/pnpm/store/v11/index.db");
+const del = db.prepare("DELETE FROM package_index WHERE key LIKE '%having5548-dsh-backup.tgz%'").run();
+console.log("deleted rows:", del.changes);
+db.close();
+'@ | Set-Content -Encoding utf8 clean-store.cjs
+node clean-store.cjs      # 打印 deleted rows: 1 即可
+```
+
+```bash
+dsh plugin --profile desktop add https://github.com/gaodayihao/dsh-backup/releases/latest/download/having5548-dsh-backup.tgz
+```
+
+> `pnpm store prune` **无效**：它清理的是包，不是这行索引。
+> 实在嫌麻烦，直接 `Remove-Item -Recurse -Force "$env:LOCALAPPDATA\pnpm\store"` 删掉整个 store 也行——
+> 效果一样（下次安装会重新下载所有依赖，只是慢一点）。
+
+**修法二（最省事，`file:` 形式不受这条硬校验约束）**：
+
+```bash
+curl -L -o having5548-dsh-backup.tgz https://github.com/gaodayihao/dsh-backup/releases/latest/download/having5548-dsh-backup.tgz
+dsh plugin --profile desktop add ./having5548-dsh-backup.tgz
+```
+
+> 代价：profile 的 `pnpm-lock.yaml` 会记住这个 tgz 的**绝对路径**，别把它删掉。
+
+> ⚠️ 安装失败会在 profile 的 `pnpm-lock.yaml` 里**残留一条没有 `integrity` 的条目**，它会让之后每次安装立刻失败。修之前先确认这条（`'@having5548/dsh-backup@https://…'`）已被删除，或者按 [上游给的写法](https://github.com/pnpm/pnpm/issues/12185#issuecomment-4670405277) 给它补上 `integrity`（`sha512-` + tarball 的 SHA-512 base64）。
+
+**根治**：把 DSH 桌面端升到内置 pnpm ≥ 11.9.0 的版本。
 
 ## 🚀 快速开始
 
