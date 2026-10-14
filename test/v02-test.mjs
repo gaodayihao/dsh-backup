@@ -16,6 +16,7 @@ import {
   REDACT_MARKER, redactYamlSecrets, mergeRedactedSettings,
   doctorScan, resolveLayout, assembleBackupZip, COMPONENTS,
   listBackups, rotateBackups, readAutoState, writeAutoState, backupFileName,
+  resolveProfile, resolveProfileName, setProfileContext, clearProfileContext,
 } from '../lib/store.js'
 import { backupToFile, defaultBackupDir, verifyBackupFile, writeRescueTools } from '../lib/backupdir.js'
 import { planImport, extractPayload, applyImport } from '../lib/store.js'
@@ -393,12 +394,72 @@ test('rescue.mjs：verify / restore（只补缺失） / restore --force 覆盖',
   }
 })
 
+test('rescue.mjs：cordis.patch.yml 空模板按缺失还原 / 非空保留 / 根 patch 落点正确', async () => {
+  const root = tmpRoot()
+  const prev = {
+    home: process.env.DSH_HOME, mnemon: process.env.MNEMON_DATA_DIR,
+    profile: process.env.DSH_PROFILE, dir: process.env.DSH_PROFILE_DIR,
+  }
+  const rescueSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'rescue', 'rescue.mjs')
+  const TEMPLATE = '# Your patch layer for this dsh profile, applied after every bundle layer:\n# a top-level YAML array of loader patch entries (id-targeted config\n# overrides, disables, and insert lists; `!!js` expressions allowed).\n[]\n'
+  const userPatch = '- id: agent-default-model\n  name: "@deepseek-ai/dsh-agent-default-model"\n  config:\n    provider: opencode-go\n'
+  const homePatch = '- id: ui-chat\n  name: "@deepseek-ai/dsh-client-ui-chat"\n'
+  try {
+    delete process.env.DSH_PROFILE
+    delete process.env.DSH_PROFILE_DIR
+
+    // 源机：只有 desktop profile（没有 web）——救援通道不得再硬编码 web
+    const homeA = path.join(root, 'home-a')
+    process.env.DSH_HOME = homeA
+    process.env.MNEMON_DATA_DIR = path.join(root, 'home-a-mnemon')
+    write(path.join(homeA, 'profiles', 'desktop', 'package.json'), JSON.stringify({ name: 'dsh-profile-desktop', dsh: { profile: { bundles: [] } } }))
+    write(path.join(homeA, 'profiles', 'desktop', 'cordis.patch.yml'), userPatch)
+    write(path.join(homeA, 'cordis.patch.yml'), homePatch)
+    const layoutA = resolveLayout()
+    assert.equal(layoutA.profileName, 'desktop', '只有 desktop 时必须靠单目录兜底识别')
+
+    const chunks = []
+    await assembleBackupZip(layoutA, new Set(['profile']), { sink: { async write(c) { chunks.push(c) } }, redactSecrets: false })
+    const backupDir = path.join(root, 'backups')
+    fs.mkdirSync(backupDir, { recursive: true })
+    const zipName = 'dsh-backup-profile.zip'
+    fs.writeFileSync(path.join(backupDir, zipName), Buffer.concat(chunks))
+
+    // 目标 1：DSH 已用空模板初始化过 profile → 默认（copy-missing）也必须还原
+    const homeR1 = path.join(root, 'home-r1')
+    write(path.join(homeR1, 'profiles', 'desktop', 'package.json'), JSON.stringify({ name: 'dsh-profile-desktop', dsh: { profile: { bundles: [] } } }))
+    write(path.join(homeR1, 'profiles', 'desktop', 'cordis.patch.yml'), TEMPLATE)
+    const out1 = await execFileAsync(process.execPath, [rescueSrc, 'restore', zipName, '--dir', backupDir,
+      '--home', homeR1, '--mnemon', path.join(root, 'home-r1-mnemon')])
+    assert.equal(fs.readFileSync(path.join(homeR1, 'profiles', 'desktop', 'cordis.patch.yml'), 'utf8'), userPatch, '空模板必须被备份内容替换')
+    assert.equal(fs.readFileSync(path.join(homeR1, 'cordis.patch.yml'), 'utf8'), homePatch, '根 patch 层落点必须是 <home>/cordis.patch.yml')
+    assert.ok(!fs.existsSync(path.join(homeR1, 'profiles', 'web')), '不得凭空造出 profiles/web')
+    assert.match(out1.stdout, /保留本机/)
+
+    // 目标 2：本机有真实配置 → 默认不覆盖（救援语义的保守性不变）
+    const homeR2 = path.join(root, 'home-r2')
+    write(path.join(homeR2, 'profiles', 'desktop', 'cordis.patch.yml'), '- id: ui-theme\n')
+    const out2 = await execFileAsync(process.execPath, [rescueSrc, 'restore', zipName, '--dir', backupDir,
+      '--home', homeR2, '--mnemon', path.join(root, 'home-r2-mnemon')])
+    assert.equal(fs.readFileSync(path.join(homeR2, 'profiles', 'desktop', 'cordis.patch.yml'), 'utf8'), '- id: ui-theme\n', '本机真实配置不得被默认模式覆盖')
+    assert.match(out2.stdout, /保留本机 1 个/)
+  } finally {
+    if (prev.home === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prev.home
+    if (prev.mnemon === undefined) delete process.env.MNEMON_DATA_DIR; else process.env.MNEMON_DATA_DIR = prev.mnemon
+    if (prev.profile === undefined) delete process.env.DSH_PROFILE; else process.env.DSH_PROFILE = prev.profile
+    if (prev.dir === undefined) delete process.env.DSH_PROFILE_DIR; else process.env.DSH_PROFILE_DIR = prev.dir
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('resolveProfileName：DSH_PROFILE → --profile → 回落 web', async () => {
   const { resolveProfileName } = await import('../lib/store.js')
   const prevEnv = process.env.DSH_PROFILE
   const prevArgv = process.argv
   try {
+    clearProfileContext()
     delete process.env.DSH_PROFILE
+    delete process.env.DSH_PROFILE_DIR
     process.argv = ['node', 'test.mjs']
     assert.equal(resolveProfileName(), 'web')
     process.argv = ['node', 'test.mjs', '--profile', 'desktop']
@@ -409,8 +470,68 @@ test('resolveProfileName：DSH_PROFILE → --profile → 回落 web', async () =
     process.env.DSH_PROFILE = 'desktop'
     assert.equal(resolveProfileName(), 'desktop', '环境变量优先于默认值')
   } finally {
+    clearProfileContext()
     if (prevEnv === undefined) delete process.env.DSH_PROFILE; else process.env.DSH_PROFILE = prevEnv
     process.argv = prevArgv
+  }
+})
+
+test('resolveProfile：桌面端位置参数 / DSH_PROFILE_DIR / profileContext 优先链', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dshb-profile-'))
+  const prev = {
+    home: process.env.DSH_HOME,
+    mnemon: process.env.MNEMON_DATA_DIR,
+    profile: process.env.DSH_PROFILE,
+    dir: process.env.DSH_PROFILE_DIR,
+    argv: process.argv,
+  }
+  try {
+    clearProfileContext()
+    delete process.env.DSH_PROFILE
+    delete process.env.DSH_PROFILE_DIR
+    process.env.DSH_HOME = root
+    process.env.MNEMON_DATA_DIR = path.join(root, 'mnemon')
+
+    // Electron 桌面端：没有 --profile，只有位置参数 <dshHome>/profiles/<名>
+    const desktopDir = path.join(root, 'profiles', 'desktop')
+    fs.mkdirSync(desktopDir, { recursive: true })
+    process.argv = ['DeepSeek Harness.exe', '--expose-internals', 'app.asar/dsh/index.js', desktopDir, 'runtime']
+    assert.equal(resolveProfile().name, 'desktop', '位置参数必须被识别')
+    assert.equal(resolveProfile().source, 'argv-profile-dir')
+    assert.equal(resolveLayout().profileDir, desktopDir)
+
+    // DSH_PROFILE_DIR 优先于位置参数（目录可直接定位，名字从 basename 取）
+    process.env.DSH_PROFILE_DIR = path.join(root, 'profiles', 'custom')
+    assert.equal(resolveProfileName(), 'custom')
+    assert.equal(resolveLayout().profileDir, path.join(root, 'profiles', 'custom'))
+    delete process.env.DSH_PROFILE_DIR
+
+    // profiles 下只有一个目录时兜底采用（无任何其它信号）
+    process.argv = ['node', 'test.mjs']
+    assert.equal(resolveProfileName(), 'desktop')
+
+    // profileContext（宿主注入，含 dir / patchPath）优先于一切探测
+    setProfileContext({ name: 'desktop', dir: desktopDir, patchPath: path.join(desktopDir, 'cordis.patch.yml') })
+    process.env.DSH_PROFILE = 'web'
+    process.argv = ['node', 'test.mjs', '--profile', 'web']
+    const resolved = resolveProfile()
+    assert.equal(resolved.name, 'desktop')
+    assert.equal(resolved.source, 'profileContext')
+    const layout = resolveLayout()
+    assert.equal(layout.profileDir, desktopDir)
+    assert.equal(layout.p.profilePatchYml, path.join(desktopDir, 'cordis.patch.yml'))
+    assert.equal(layout.p.homePatchYml, path.join(root, 'cordis.patch.yml'))
+
+    // 显式传名时不吃 profileContext 的目录（调用方要的是另一个 profile）
+    assert.equal(resolveLayout('other').profileDir, path.join(root, 'profiles', 'other'))
+  } finally {
+    clearProfileContext()
+    process.argv = prev.argv
+    if (prev.home === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prev.home
+    if (prev.mnemon === undefined) delete process.env.MNEMON_DATA_DIR; else process.env.MNEMON_DATA_DIR = prev.mnemon
+    if (prev.profile === undefined) delete process.env.DSH_PROFILE; else process.env.DSH_PROFILE = prev.profile
+    if (prev.dir === undefined) delete process.env.DSH_PROFILE_DIR; else process.env.DSH_PROFILE_DIR = prev.dir
+    fs.rmSync(root, { recursive: true, force: true })
   }
 })
 

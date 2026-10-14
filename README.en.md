@@ -27,7 +27,7 @@
 - **Encrypted credential store** — `~/.dsh/.credentials.yaml` (API keys + the connection cookie-signing secret) is a file where *every* line is a secret, so redaction is meaningless for it. Set a passphrase under Settings and it is sealed with AES-256-GCM + scrypt into `payload/credentials/.credentials.yaml.enc`; without a passphrase the component is skipped entirely rather than exported in the clear. The container carries a plaintext sha256, so a wrong passphrase fails *before* your local file is touched.
 - **Editable backup folder & retention** — both are now fields in the settings panel, validated by an actual probe write when you save.
 - **Preview before restore** — a dry-run plan shows exactly what will be added / overwritten / kept, plus missing-plugin detection. All writes go through staging → CRC verification → atomic commit → rollback with `.bak`.
-- **Merge / replace modes** — merge only fills what's missing; replace overwrites matching files (never deletes extras) and keeps `.bak` copies.
+- **Merge / replace modes** — merge only fills what's missing; replace overwrites matching files (never deletes extras) and keeps `.bak` copies. The one deliberate exception is the user patch layer `cordis.patch.yml` (in the profile and at `~/.dsh/cordis.patch.yml`): DSH creates it as an empty template (`[]`) on profile init, so "the file exists" does **not** mean "you have config" — replace always restores it, merge restores it when the local copy is still just the template, and a locally non-empty patch is kept with an explicit warning.
 
 ## Install
 
@@ -56,7 +56,7 @@ Restart `dsh web`, then open **Settings → Backup & Restore** or type `/backup`
 
 ## The DshBackup v1 format
 
-A zip containing `manifest.json` (+ sha256 in `checksums.json`), an optional `redaction.json`, and `payload/` with `sessions/`, `sessions-archive/`, `storages/workspace.json`, `storages/session_projcache/`, `attachments/`, `settings/settings.yaml`, `credentials/.credentials.yaml.enc`, `profile/`, `mnemon/{runtime,documents,data}/`, `extensions/`. Every entry is CRC-verified on import; a higher `formatVersion` is rejected explicitly instead of being applied blindly.
+A zip containing `manifest.json` (+ sha256 in `checksums.json`), an optional `redaction.json`, and `payload/` with `sessions/`, `sessions-archive/`, `storages/workspace.json`, `storages/session_projcache/`, `attachments/`, `settings/settings.yaml`, `credentials/.credentials.yaml.enc`, `profile/`, `profile-home/cordis.patch.yml` (the home-level patch layer applied over every profile), `mnemon/{runtime,documents,data}/`, `extensions/`. Every entry is CRC-verified on import; a higher `formatVersion` is rejected explicitly instead of being applied blindly.
 
 ## Why mnemon injection stays identical
 

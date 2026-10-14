@@ -17,6 +17,10 @@
 // 恢复语义（救援模式，保守优先）：
 //   默认只还原「本机不存在」的文件（copy-missing），绝不覆盖已有数据；
 //   --force 时覆盖已有文件，原文件先改名 *.bak-rescue-<时间戳> 保留。
+//   唯一例外：cordis.patch.yml（profile 内与 dshHome 根各一份）如果本机内容只是
+//   DSH 自动生成的空模板（只有注释和 `[]`），也按「不存在」处理——换机后 DSH
+//   已经建过这个文件，不这样处理用户的全部 patch 配置永远回不来；本机有真实
+//   配置时依旧不覆盖，--force 才覆盖。
 //   workspace.json / settings.yaml / mnemon 的 SQLite 库与 wal/shm 按字节
 //   还原（SQLite 先清 -wal/-shm 防旧 WAL 配新库）。
 //
@@ -33,6 +37,9 @@ import zlib from 'node:zlib'
 import readline from 'node:readline'
 import nodeCrypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+
+/** 用户 patch 层文件名（profile 内一份 + dshHome 根一份），与 lib/store.js 同名常量一致。 */
+const PROFILE_PATCH_FILENAME = 'cordis.patch.yml'
 
 // ---------------------------------------------------------------------------
 // 凭据解密（内联自 lib/crypto.js；零第三方依赖，保持救援通道自足）
@@ -224,6 +231,10 @@ function classify(zipPath) {
   if (rest.startsWith('attachments/')) return { component: 'attachments', rel: rest.slice('attachments/'.length) }
   if (rest === 'settings/settings.yaml') return { component: 'settings', rel: 'settings.yaml' }
   if (rest === 'credentials/.credentials.yaml.enc') return { component: 'credentials', rel: '.credentials.yaml.enc', encrypted: true }
+  // dshHome 根的全局 patch 层：必须在 profile/ 之前判掉（否则 'profile-home/…'
+  // 不匹配 'profile/' 前缀而被静默忽略，用户配置在救援通道里就丢了）。
+  if (rest === 'profile-home/' + PROFILE_PATCH_FILENAME) return { component: 'profile', rel: PROFILE_PATCH_FILENAME, home: true }
+  if (rest.startsWith('profile-home/')) return null
   if (rest.startsWith('profile/')) return { component: 'profile', rel: rest.slice('profile/'.length) }
   if (rest.startsWith('mnemon/')) return { component: 'mnemon', rel: rest.slice('mnemon/'.length) }
   if (rest.startsWith('extensions/')) return { component: 'extensions', rel: rest.slice('extensions/'.length) }
@@ -236,6 +247,35 @@ function safeJoin(base, rel) {
   return path.join(base, ...parts)
 }
 
+/**
+ * profile 目录解析：与 lib/store.js 的优先链同源（救援环境里没有 profileContext，
+ * 也没有 Harness 的 argv，只能靠环境变量 + 单目录兜底）。
+ * 不能硬编码 web：新版桌面端用 desktop profile（AGENTS.md 硬性禁忌 8），
+ * 写错目录会在换机后凭空造出一个 profiles/web 并把配置塞错地方。
+ */
+function resolveProfileDir(home) {
+  const envDir = process.env.DSH_PROFILE_DIR
+  if (envDir && String(envDir).trim()) return path.resolve(String(envDir).trim())
+  const envName = process.env.DSH_PROFILE
+  if (envName && String(envName).trim()) return path.join(home, 'profiles', String(envName).trim())
+  try {
+    const dirs = fs.readdirSync(path.join(home, 'profiles'), { withFileTypes: true })
+      .filter((it) => it.isDirectory() && !it.name.startsWith('.'))
+    if (dirs.length === 1) return path.join(home, 'profiles', dirs[0].name)
+  } catch { /* profiles 目录不存在：交给回落值 */ }
+  return path.join(home, 'profiles', 'web')
+}
+
+/** 内容是否只是空白 patch 模板（只有注释和 `[]` / 空）——与 lib/store.js 同判定。 */
+function isEmptyPatchText(text) {
+  const body = String(text == null ? '' : text)
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n')
+    .trim()
+  return body === '' || body === '[]'
+}
+
 function destFor(home, mnemonRoot, cls) {
   const join = (...segs) => path.join(home, ...segs)
   switch (cls.component) {
@@ -246,8 +286,8 @@ function destFor(home, mnemonRoot, cls) {
     case 'settings': return join('settings.yaml')
     // 与 lib/store.js 的 destForComponent 保持一致：凭据最终落在 <home>/.credentials.yaml
     case 'credentials': return join('.credentials.yaml')
-    // 不能硬编码 web：新版桌面端用 desktop profile（AGENTS.md 硬性禁忌 8）
-    case 'profile': return safeJoin(join('profiles', process.env.DSH_PROFILE || 'web'), cls.rel)
+    // profile 内 patch 与 dshHome 根 patch 落点不同，靠 cls.home 区分
+    case 'profile': return cls.home ? join(PROFILE_PATCH_FILENAME) : safeJoin(resolveProfileDir(home), cls.rel)
     case 'mnemon': return safeJoin(mnemonRoot, cls.rel)
     case 'extensions': {
       const segs = cls.rel.split('/')
@@ -287,11 +327,11 @@ async function renameWithRetry(src, dest, tries = 4) {
   }
 }
 
-async function commitStaged(staged, dest, force) {
+async function commitStaged(staged, dest, force, overwriteEmptyTemplate = false) {
   await fs.promises.mkdir(path.dirname(dest), { recursive: true })
   let existing = false
   try { await fs.promises.stat(dest); existing = true } catch { /* absent */ }
-  if (existing && !force) return { action: 'keptLocal' }
+  if (existing && !force && !overwriteEmptyTemplate) return { action: 'keptLocal' }
   if (existing) {
     const bak = dest + '.bak-rescue-' + timestampSlug()
     await renameWithRetry(dest, bak)
@@ -334,6 +374,17 @@ export async function rescueRestore(zipAbs, { dryRun = false, force = false, hom
       let exists = false
       try { await fs.promises.stat(dest); exists = true } catch { /* absent */ }
 
+      // cordis.patch.yml 的「存在」不等于「本机有用户配置」：DSH 初始化 profile 时
+      // 就写好了注释 + `[]` 的空模板。把空模板当缺失，才能在换机后真正还原用户配置；
+      // 本机有真实内容时依旧只补缺失（--force 才覆盖），救援语义的保守性不变。
+      let overwriteEmptyTemplate = false
+      if (exists && !force && cls.component === 'profile' && cls.rel === PROFILE_PATCH_FILENAME) {
+        try {
+          overwriteEmptyTemplate = isEmptyPatchText(await fs.promises.readFile(dest, 'utf8'))
+        } catch { /* 读不到就按已有内容处理，宁可保守 */ }
+      }
+      const willWrite = !exists || force || overwriteEmptyTemplate
+
       let data = await reader.readEntry(entry)
       if (cls.encrypted) {
         // 凭据在包里是密文：绝不能原样写成 .credentials.yaml，
@@ -356,7 +407,7 @@ export async function rescueRestore(zipAbs, { dryRun = false, force = false, hom
 
       // 预演模式不落任何暂存字节（旧版会把整个 payload 解到暂存区却不清理）
       if (dryRun) {
-        (exists ? (force ? plan.replaced : plan.keptLocal) : plan.created).push(dest)
+        (willWrite ? (exists ? plan.replaced : plan.created) : plan.keptLocal).push(dest)
         continue
       }
 
@@ -367,11 +418,13 @@ export async function rescueRestore(zipAbs, { dryRun = false, force = false, hom
         stageRoots.set(base, stage)
       }
       const stage = stageRoots.get(base)
-      const staged = path.join(stage, cls.component, cls.rel.replace(/[/\\]/g, '__'))
+      // 暂存名要区分 dshHome 根 patch 与 profile 内 patch：两者 component/rel 相同，
+      // 只用 rel 会互相覆盖（表现是 applyImport 阶段 rename ENOENT）。
+      const staged = path.join(stage, cls.component, (cls.home ? 'home__' : '') + cls.rel.replace(/[/\\]/g, '__'))
       await fs.promises.mkdir(path.dirname(staged), { recursive: true })
       await fs.promises.writeFile(staged, data, cls.encrypted ? { mode: 0o600 } : undefined)
 
-      const res = await commitStaged(staged, dest, force)
+      const res = await commitStaged(staged, dest, force, overwriteEmptyTemplate)
       if (res.action === 'created') plan.created.push(dest)
       else if (res.action === 'replaced') plan.replaced.push({ dest, bak: res.bak })
       else plan.keptLocal.push(dest)
@@ -554,12 +607,14 @@ async function main() {
     const dryRun = flag('--dry-run')
     const force = flag('--force')
     const credentialsPassphrase = val('--passphrase') || process.env.DSH_BACKUP_CREDENTIALS_PASSPHRASE || ''
+    const homeArg = val('--home') || path.join(os.homedir(), '.dsh')
+    const mnemonArg = val('--mnemon') || path.join(os.homedir(), '.mnemon')
     console.log(`备份：${zipAbs}`)
-    console.log(`目标：~/.dsh 与 ~/.mnemon${dryRun ? '（预演，不写入）' : ''} · 模式：${force ? '覆盖（留 .bak）' : '只补缺失文件'}`)
+    console.log(`目标：${homeArg} 与 ${mnemonArg}${dryRun ? '（预演，不写入）' : ''} · 模式：${force ? '覆盖（留 .bak）' : '只补缺失文件（cordis.patch.yml 本机若只是空模板也还原）'}`)
     const r = await rescueRestore(zipAbs, {
       dryRun, force, credentialsPassphrase,
-      home: val('--home') || undefined,
-      mnemonRoot: val('--mnemon') || undefined,
+      home: homeArg,
+      mnemonRoot: mnemonArg,
     })
     console.log(`  还原文件 ${r.plan.created.length} 个，覆盖 ${r.plan.replaced.length} 个，保留本机 ${r.plan.keptLocal.length} 个，跳过 ${r.plan.skipped.length} 个`)
     if (r.plan.credentials.present) {

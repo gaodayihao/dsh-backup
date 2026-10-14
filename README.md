@@ -150,7 +150,7 @@ dsh plugin --profile desktop add ./having5548-dsh-backup.tgz
 | 附件 | 对话中引用的图片 / 文件（`~/.dsh/attachments/`） | ✅ |
 | 设置 | `settings.yaml`，各插件设置（**可能含 API 密钥，请妥善保管备份**） | ✅ |
 | **凭据库** | `~/.dsh/.credentials.yaml`（API 密钥 + 登录签名密钥），整文件皆为密钥，**AES-256-GCM 加密后才入包**；未设密码则整条跳过并写明原因 | ✅ |
-| Profile 插件清单 | `profiles/<profile>/` 的 package.json 与 patch 文件；导入时仅补缺并生成缺失插件报告 | ✅ |
+| Profile 插件清单与用户配置 | `profiles/<profile>/` 的 `cordis.patch.yml`（**用户配置本体**：模型/provider/MCP/UI 等覆盖）+ `package.json` / `cordis.yml` / `pnpm-workspace.yaml`，以及 `~/.dsh/cordis.patch.yml`（叠加在所有 profile 之上的根 patch 层）。导入时 patch 文件会按模式还原（覆盖模式强制还原、合并模式下本机只是空模板也还原、本机有非空配置则保留并告警），插件清单只补缺 | ✅ |
 | dsh-mnemon 记忆数据 | `~/.mnemon/{runtime, documents, data[, state]}`，上下文注入的全部来源 | ✅ |
 | 其他插件数据 | task-board / dsh-usage / skins 等第三方插件的数据目录（动态发现） | ⬜ |
 
@@ -165,6 +165,8 @@ dsh plugin --profile desktop add ./having5548-dsh-backup.tgz
 | mnemon 记忆体（SQLite） | 仅新增 body，已有 body 一律保留本机 | 全量替换（先清 `-wal`/`-shm`，防旧 WAL 配新库） |
 | settings.yaml | 跳过（想覆盖请用覆盖模式） | 整体替换 |
 | 凭据库 `.credentials.yaml` | 跳过（整文件替换语义，合并两份凭据只会互相覆盖） | 解密后整体替换（原文件留 `.bak`，权限收紧到 `0600`） |
+| 用户配置 `cordis.patch.yml`（profile 内 + `~/.dsh` 根） | 本机有**非空**配置时保留本机并告警；本机只是 DSH 自动生成的空模板（注释 + `[]`）时按备份还原 | 强制还原为备份内容（原文件留 `.bak`） |
+| profile 插件清单（`package.json` / `cordis.yml` / `pnpm-workspace.yaml`） | 只补缺（本机已有就保留，避免打乱已装插件） | 只补缺 |
 | 被替换的原文件 | — | 保留为 `*.bak-dshbackup-<时间戳>`，可随时手动还原 |
 
 ## 🛟 救援通道（DSH 起不来时）
@@ -255,7 +257,8 @@ payload/
   attachments/…                            ← 附件
   settings/settings.yaml                   ← 设置（默认已脱敏）
   credentials/.credentials.yaml.enc        ← 凭据库（AES-256-GCM + scrypt；密码缺失时整条不出现）
-  profile/…                                ← 插件清单（package.json / cordis.patch.yml / …）
+  profile/…                                ← 插件清单 + 用户配置（cordis.patch.yml / package.json / cordis.yml / …）
+  profile-home/cordis.patch.yml            ← ~/.dsh/cordis.patch.yml（叠加在所有 profile 之上的根 patch 层）
   mnemon/{runtime,documents,data}/…        ← dsh-mnemon 数据
   extensions/<插件数据>/…                   ← 其它插件数据
 ```

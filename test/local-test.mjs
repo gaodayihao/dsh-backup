@@ -25,6 +25,8 @@ import {
   classifyZipPath, destForComponent, mergeWorkspaceRegistries,
   mergeMemoriesJson, mergeDocumentsIndex, planImport, extractPayload,
   applyImport, cleanupStale, COMPONENTS, assembleBackupZip,
+  PROFILE_PATCH_FILE, HOME_PATCH_ZIP_PATH, isEmptyPatchText,
+  clearProfileContext, resolveProfileName,
 } from '../lib/store.js'
 // ---------------------------------------------------------------------------
 // 工具
@@ -610,6 +612,111 @@ test('暂存区过期清理', async () => {
   } finally {
     process.env.DSH_HOME = prevHome
     process.env.MNEMON_DATA_DIR = prevMnemon
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// profile 用户配置（cordis.patch.yml）：导出必须进包 + 换机必须能还原
+//
+// 回归两组真实故障：
+//   1. Electron 桌面端不设 DSH_PROFILE、不传 --profile，只用位置参数
+//      <dshHome>/profiles/<名>；旧实现回落到 'web'，profile 组件永远是空的
+//      （E:\dsh-backups 里的备份就是这样：profile present:false，没有
+//      payload/profile/ 目录）。
+//   2. 换机后 DSH 已用空模板 `[]` 初始化过 cordis.patch.yml，旧的「只补缺」
+//      语义把「已存在」误判成「本机有配置」，用户的 patch 配置静默丢失。
+// ---------------------------------------------------------------------------
+
+const DSH_PATCH_TEMPLATE = '# Your patch layer for this dsh profile, applied after every bundle layer:\n# a top-level YAML array of loader patch entries (id-targeted config\n# overrides, disables, and insert lists; `!!js` expressions allowed).\n[]\n'
+
+test('profile 配置：桌面端位置参数解析 + cordis.patch.yml 导出/换机还原', async () => {
+  const root = tmpRoot()
+  const prevHome = process.env.DSH_HOME
+  const prevMnemon = process.env.MNEMON_DATA_DIR
+  const prevArgv = process.argv
+  const prevProfile = process.env.DSH_PROFILE
+  const prevProfileDir = process.env.DSH_PROFILE_DIR
+
+  const userPatch = '- id: agent-default-model\n  name: "@deepseek-ai/dsh-agent-default-model"\n  config:\n    provider: opencode-go\n    model: deepseek-v4.1-flash\n    reasoningEffort: high\n'
+  const homePatch = '- id: ui-chat\n  name: "@deepseek-ai/dsh-client-ui-chat"\n  config:\n    transcriptView: detailed\n'
+  const localPatch = '- id: ui-theme\n  name: "@deepseek-ai/dsh-client-ui-theme"\n'
+
+  /** 模拟换机后的新 home：DSH 首次启动已建好 profile（patch 是空模板）。 */
+  function freshHome(name, localPatchContent = DSH_PATCH_TEMPLATE) {
+    const home = path.join(root, name)
+    process.env.DSH_HOME = home
+    process.env.MNEMON_DATA_DIR = path.join(root, name + '-mnemon')
+    process.argv = ['DeepSeek Harness.exe', 'app.asar/dsh/index.js', path.join(home, 'profiles', 'desktop'), 'runtime']
+    write(path.join(home, 'profiles', 'desktop', 'package.json'), JSON.stringify({ name: 'dsh-profile-desktop', dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }))
+    write(path.join(home, 'profiles', 'desktop', PROFILE_PATCH_FILE), localPatchContent)
+    return resolveLayout()
+  }
+
+  try {
+    clearProfileContext()
+    delete process.env.DSH_PROFILE
+    delete process.env.DSH_PROFILE_DIR
+
+    // ---- 源机：desktop profile，Harness 只用位置参数告知 profile ----
+    const homeA = path.join(root, 'home-a')
+    process.env.DSH_HOME = homeA
+    process.env.MNEMON_DATA_DIR = path.join(root, 'home-a-mnemon')
+    write(path.join(homeA, 'profiles', 'desktop', 'package.json'), JSON.stringify({
+      name: 'dsh-profile-desktop',
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
+    }, null, 2))
+    write(path.join(homeA, 'profiles', 'desktop', PROFILE_PATCH_FILE), userPatch)
+    write(path.join(homeA, 'profiles', 'desktop', 'cordis.yml'), '[]\n')
+    write(path.join(homeA, 'profiles', 'desktop', 'pnpm-workspace.yaml'), 'packages:\n  - .\n')
+    write(path.join(homeA, PROFILE_PATCH_FILE), homePatch)
+
+    process.argv = ['DeepSeek Harness.exe', '--expose-internals', 'app.asar/dsh/index.js', path.join(homeA, 'profiles', 'desktop'), 'runtime']
+    assert.equal(resolveProfileName(), 'desktop', '位置参数里的 profile 必须被识别（否则 profile 组件恒为空）')
+    const layoutA = resolveLayout()
+    assert.equal(layoutA.profileDir, path.join(homeA, 'profiles', 'desktop'))
+
+    // ---- 导出：profile 内 patch + dshHome 根 patch 都必须进包 ----
+    assert.ok(isEmptyPatchText(DSH_PATCH_TEMPLATE), '官方空模板应被判定为空 patch')
+    const { zip } = await exportBackup(layoutA, ['profile'])
+    const peek = path.join(root, 'peek.zip')
+    fs.writeFileSync(peek, zip)
+    const reader = new ZipReader(peek)
+    await reader.open()
+    const entry = (n) => reader.entries.find((e) => e.name === n)
+    assert.ok(entry('payload/profile/' + PROFILE_PATCH_FILE), 'profile 内 cordis.patch.yml 必须进包')
+    assert.equal((await reader.readEntry(entry('payload/profile/' + PROFILE_PATCH_FILE))).toString('utf8'), userPatch, '内容必须字节级一致')
+    assert.ok(entry(HOME_PATCH_ZIP_PATH), 'dshHome 根 cordis.patch.yml 必须进包')
+    assert.equal((await reader.readEntry(entry(HOME_PATCH_ZIP_PATH))).toString('utf8'), homePatch)
+    await reader.close()
+
+    // ---- (1) 覆盖模式：本机只是空模板，也必须被用户配置覆盖 ----
+    let layoutF = freshHome('home-fresh-replace')
+    let res = await importBackup(zip, layoutF, 'replace', ['profile'])
+    assert.ok(res.report.ok, '导入应无错误：' + JSON.stringify(res.report.errors))
+    assert.equal(fs.readFileSync(path.join(layoutF.profileDir, PROFILE_PATCH_FILE), 'utf8'), userPatch, '覆盖模式必须还原用户 patch 配置')
+    assert.equal(fs.readFileSync(layoutF.p.homePatchYml, 'utf8'), homePatch, 'dshHome 根 patch 层也要还原')
+    assert.ok(res.report.components.profile.restored.includes(PROFILE_PATCH_FILE))
+    assert.ok(res.report.needsRestart, 'patch 层还原后必须提示重载（重启 dsh 才生效）')
+
+    // ---- (2) 合并模式 + 本机空模板：空模板不算「用户已有配置」，同样还原 ----
+    layoutF = freshHome('home-fresh-merge-empty')
+    res = await importBackup(zip, layoutF, 'merge', ['profile'])
+    assert.equal(fs.readFileSync(path.join(layoutF.profileDir, PROFILE_PATCH_FILE), 'utf8'), userPatch, '合并模式下空模板也应被覆盖')
+
+    // ---- (3) 合并模式 + 本机有真实配置：保留本机，但必须明确告警 ----
+    layoutF = freshHome('home-fresh-merge-local', localPatch)
+    res = await importBackup(zip, layoutF, 'merge', ['profile'])
+    assert.equal(fs.readFileSync(path.join(layoutF.profileDir, PROFILE_PATCH_FILE), 'utf8'), localPatch, '合并模式不得覆盖本机真实配置')
+    assert.ok(res.report.components.profile.kept.includes(PROFILE_PATCH_FILE))
+    assert.ok(res.report.warnings.some((w) => w.includes('不会还原')), '保留本机时必须明确告警：' + JSON.stringify(res.report.warnings))
+  } finally {
+    clearProfileContext()
+    process.argv = prevArgv
+    if (prevHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prevHome
+    if (prevMnemon === undefined) delete process.env.MNEMON_DATA_DIR; else process.env.MNEMON_DATA_DIR = prevMnemon
+    if (prevProfile === undefined) delete process.env.DSH_PROFILE; else process.env.DSH_PROFILE = prevProfile
+    if (prevProfileDir === undefined) delete process.env.DSH_PROFILE_DIR; else process.env.DSH_PROFILE_DIR = prevProfileDir
     fs.rmSync(root, { recursive: true, force: true })
   }
 })

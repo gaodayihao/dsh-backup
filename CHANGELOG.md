@@ -38,10 +38,20 @@
 
 _(把下一次改动的条目写在这里,发版时把标题改成版本号与日期)_
 
+---
+
+## [0.6.1] - 2026-10-14
+
+### 新增
+
+- **dshHome 根的用户 patch 层纳入备份**:DSH 的 patch 叠加顺序是「bundle 层 → `<profile>/cordis.patch.yml` → **`$DSH_HOME/cordis.patch.yml`(叠加在所有 profile 之上)** → `--patch`」,而此前只备份了 profile 目录内那一份,写在根 patch 层里的全局配置换机会整份丢失。现以 `payload/profile-home/cordis.patch.yml` 收入 profile 组件(文件不存在时不报错),还原落点为 `$DSH_HOME/cordis.patch.yml`。
+- **`/dsh-backup/status` 暴露 profile 解析来源**:新增 `profileSource`(profileContext / DSH_PROFILE_DIR / DSH_PROFILE / --profile / argv-profile-dir / sole-profile-dir / fallback-web)与 `profileExists`;设置面板「当前状态」显示解析来源,并在 `profileExists === false` 时直接告警「profile 组件会被导出为空」——这类「备份里静默少了一个组件」的问题以后一眼可见。
+
 ### 变更
 
 - **分发方式的主推安装命令从 Release tgz 改为 `github:` 直装**:README「📦 安装」首选 `dsh plugin --profile desktop add github:gaodayihao/dsh-backup`,Release tgz 降为「本机没有 `git`」时的备选(固定名资产**继续保留**)。理由是 pnpm(含 DSH 桌面端内置的 11.7.0)对「直接用 URL 指定的 tgz 依赖」存在 `ERR_PNPM_MISSING_TARBALL_INTEGRITY` 缺陷(见下方修复条目),而 **git 托管依赖被该硬校验显式豁免**,`github:` 形式在同一场景下稳定通过。实测依据:同一台机器,`github:` 在「干净目录 + store 已缓存」这个专杀 tgz 的场景下 exit 0;两种装法产出的 **12 个文件 sha256 逐个相同**(pnpm 对 git 依赖同样按 `files` 白名单重新打包,`.github/` `test/` `AGENTS.md` 不会进 `node_modules`);`github:…#v0.6.0` 可钉版本(解析到同一 commit);该仓库无任何 `scripts`,不会触发 pnpm 11 的构建脚本审批拦截。代价与不变量:用户本机需要 `git`(pnpm 用 `git ls-remote` 解析 ref;实测把 git 从 PATH 摘掉后 `github:` 直接失败、而 tgz 装法不受影响),故 Release 通道与固定名 `having5548-dsh-backup.tgz` 资产**继续保留**。
 - `README.md` 与 `README.en.md` 的安装章节都改为**主推 `github:`**、tgz 降级为备选(profile 名说明统一成「桌面端 `desktop` / 旧版 CLI `web`」,首选命令示例改用 `--profile desktop`);`AGENTS.md` 同步:新增「安装方式策略」段(含「别把首选安装命令改回 tgz URL」这条红线)、`项目是什么` 里的分发描述改为主推 `github:`,并把「本地环境备忘 / 发布清单」里写死的 `H:\DeepSeek Harness\` 换成 `<DSH 安装根>`(本机是 `D:\Program Files\DeepSeek Harness\`,另一台才是 `H:\`)、给出桌面端免配 PATH 的 `resources\runtime\cli\bin\dsh.cmd` 入口。
+- **profile 组件的还原语义不再「一刀切只补缺」**:`cordis.patch.yml` 被单独识别为「用户配置」,按模式分别处理(覆盖模式强制还原并留 `.bak`;合并模式下本机只是空模板时也还原;本机有非空配置时保留本机并给出明确告警),`package.json` / `cordis.yml` / `pnpm-workspace.yaml` 仍是只补缺。还原任何 profile 文件后置 `needsRestart`(patch 层只在启动时加载,必须重载 dsh 才生效)。组件标签与描述、导入预检与导入报告的文案同步更新(报告此前只显示 `restored`、不显示 `kept`,用户看不到被跳过的文件)。
 
 ### 修复
 
@@ -51,6 +61,17 @@ _(把下一次改动的条目写在这里,发版时把标题改成版本号与�
   3. **校验层**:同一次运行紧接着用 `pkgSnapshotToResolution()` 读回该条目,其守卫要求「`type` 为空、非 `file:`、非 `gitHosted` 的 tarball 依赖必须有 `integrity`」,于是 pnpm 自己刚写下的条目把自己判死。
   现象之所以是「第一次成功、之后必失败」:干净 store 的首装会真正下载并算出 integrity;而 store 已被写脏后再也无法重新走下载路径。`pnpm store prune` **修不了**(它清理的是包,不是这行 URL 索引)。附带影响:失败前 pnpm 已把无 `integrity` 的条目写进 profile 的 `pnpm-lock.yaml`,之后每次安装会**立刻**失败;而 `file:` 形式的 tgz 依赖被该守卫显式豁免。
   **修法**:README「📦 安装」下新增「装不上?报 `ERR_PNPM_MISSING_TARBALL_INTEGRITY`」小节,写清两种可用修法(删掉 `index.db` 中该 URL 的索引行后重跑安装;或用 `curl` 落地成本地 tgz 后以 `file:` 形式安装)、`pnpm store prune` 无效、以及「锁文件里残留的无 `integrity` 条目必须先删除或补上 `integrity`」。**插件代码零改动,无需重新发版。**
+
+- **DSH 桌面端的所有备份里都没有 `payload/profile/` 目录,profile 组件恒为 `included:true / present:false / files:0`(用户实测 `E:\dsh-backups` 下 6 份自动备份全部如此)** → 根因:`resolveProfileName()` 只认 `DSH_PROFILE` 环境变量与 `--profile` 参数,而 **Electron 桌面端两者都不给**:它把 profile 当**位置参数**传给 Harness(实测宿主进程命令行为 `"DeepSeek Harness.exe" --expose-internals .../dsh-desktop-host/lib/index.js .../app.asar/dsh C:\Users\<用户>\.dsh\profiles\desktop ...`),而 `DSH_PROFILE` / `DSH_PROFILE_DIR` 只由 `dsh-shell-env` 注入**模型 shell 调用**、Harness 进程自身看不到。于是函数回落到 `'web'`,`profileDir` 指向根本不存在的 `~/.dsh/profiles/web`,profile 组件的 4 个源文件全部 `pathExists` 失败 → 导出为空(`manifest.components.profile.present=false`),`cordis.patch.yml`、`package.json`、`cordis.yml`、`pnpm-workspace.yaml` 一个都没进包。**修法**:新增 `resolveProfile()` 七级优先链(宿主注入的 `ctx.get('profileContext')` → `DSH_PROFILE_DIR` → `DSH_PROFILE` → `--profile` → argv 位置参数 `<dshHome>/profiles/<名>` → `<dshHome>/profiles` 下唯一目录 → 回落 `web`),`resolveLayout()` 在能拿到 `profileContext` 时直接采用其 `dir` / `patchPath`(不再自行拼路径);`index.js` 的 `apply(ctx)` 用 `try/catch` 惰性登记 `profileContext`(服务缺席只损失精度,绝不让插件 pending);`/dsh-backup/status` 暴露 `profileSource` / `profileExists` 以便自查。
+- **换机导入后 `cordis.patch.yml` 仍是空模板,用户配置(模型/provider/MCP/UI 覆盖)全部丢失** → 根因:`applyImport()` 的 profile 分支对**所有**文件一律「本机已存在即跳过」,而 DSH 的 `initProfile()` 在 profile 初始化时就用 `PROFILE_PATCH_TEMPLATE` 建好了这个文件(`app.asar` 内实测 `if (!existsSync(patchPath)) writeFileSync(patchPath, PROFILE_PATCH_TEMPLATE)`,模板内容为注释 + `[]`),因此**换机后必然命中跳过**;该分支还完全不设 `needsRestart`,即便补缺成功也不会重载生效。**修法**:新增 `shouldRestoreProfileEntry()`(`planImport` 预检与 `applyImport` 执行共用同一判定,保证预检不骗人)——本机不存在则还原;`cordis.patch.yml` 在**覆盖模式强制还原**(`commitFile` 自动留 `.bak`)、**合并模式且本机内容只是空模板**(`isEmptyPatchText()`:剥掉 `#` 注释后为空或 `[]`)时同样还原、本机有非空配置时保留本机并写入「备份中的这份不会还原」告警;`package.json` / `cordis.yml` / `pnpm-workspace.yaml` 维持只补缺。任何 profile 文件被写入后置 `needsRestart = true`。
+- **profile 组件一旦同时含 profile 内 patch 与 dshHome 根 patch,导入会报 `ENOENT: rename ...\profile\cordis.patch.yml`** → 根因:`extractPayload()` 用 `path.join(stagingRoot, cls.component, cls.rel)` 生成暂存名,而两个条目的 `component`/`rel` 完全相同(`profile` + `cordis.patch.yml`),后抽取的条目覆盖了先抽取的暂存文件,`applyImport` 再按计划去写时源文件已不存在。**修法**:暂存名对 `cls.home` 条目加 `home__` 前缀,使两个条目在暂存区互不覆盖。
+
+- **救援控制台(`rescue/rescue.mjs`)把 profile 写死成 `DSH_PROFILE || 'web'`,桌面端恢复会把配置塞进凭空造出的 `profiles/web`,并静默忽略新的根 patch 层** → 根因:该文件是**零依赖、会被复制进备份目录**的单文件,不能 `import lib/store.js`,于是自己维护了一份 `classify()` / `destFor()`,其中的 `case 'profile'` 分支停留在旧契约(`process.env.DSH_PROFILE || 'web'`),也没有 `profile-home/` 分支(`'profile-home/…'` 不匹配 `'profile/'` 前缀,直接 `return null` 被静默忽略)。**修法**:救援侧同步 `resolveProfileDir()`(环境变量 `DSH_PROFILE_DIR` → `DSH_PROFILE` → `<home>/profiles` 下唯一目录 → `web`)与 `profile-home` 分类;`cordis.patch.yml` 也采用「本机只是空模板(`isEmptyPatchText()`)就按缺失还原」的判定(`commitStaged()` 新增 `overwriteEmptyTemplate` 参数),本机有真实内容时默认仍不覆盖;暂存名同样加 `home__` 前缀;`restore` 的输出改用实际的 `--home` / `--mnemon` 路径(此前硬写 `~/.dsh 与 ~/.mnemon`),并在模式说明里点出 patch 例外。救援通道依旧零第三方依赖。
+
+### 兼容
+
+- **备份格式仍是 `DshBackup v1`(`FORMAT_VERSION` 未变)**:新增的 `payload/profile-home/` 是纯增量子目录,旧版插件读到它只会按「当前版本未识别的数据」告警并忽略,不影响 sessions / settings / credentials / mnemon 等其余组件;反向也成立——旧备份(没有 profile-home、且 profile 组件曾为空)在新版插件下照常处理,只是当年没进包的内容无法凭空补出。
+- **`profileContext` 是可选契约,不是新的 inject 依赖**:`inject` 仍只有 `['webServer']`,profile 上下文用 `ctx.get('profileContext')` + `try/catch` 惰性登记,拿不到就回落到环境变量 / argv / 目录探测——任何宿主版本下都只损失解析精度,不会让插件 pending 或被桌面端自动卸载。
 
 ## [0.6.0] - 2026-10-09
 

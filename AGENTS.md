@@ -49,10 +49,26 @@
 6. **`rescue/rescue.mjs` 保持零第三方依赖**(只用 node 内置模块),它是 DSH 起不来时的最后通道。
 7. 宿主 services 契约随版本漂移(0.1.5 → 0.1.7 → 新版 Electron 桌面端变化很大):升级宿主后先跑
    `test/route-harness.mjs` 与真实环境冒烟,别凭旧记忆写代码。
-8. **profile 名不要硬编码**:新版桌面端用 `desktop` profile,旧 CLI 为 `web`;必须经
-   `resolveProfileName()`(`DSH_PROFILE` 环境变量 → `--profile` 参数 → 回落 `web`)。
+8. **profile 名不要硬编码,也不能只认环境变量与 `--profile`**:新版桌面端用 `desktop` profile,
+   旧 CLI 为 `web`;必须经 `resolveProfileName()` / `resolveProfile()`。优先链是
+   `ctx.get('profileContext')` → `DSH_PROFILE_DIR` → `DSH_PROFILE` → `--profile` 参数 →
+   **argv 位置参数 `<dshHome>/profiles/<名>`** → `<dshHome>/profiles` 下唯一目录 → 回落 `web`。
+   最后两级不是冗余:**Electron 桌面端既没有 `--profile`、Harness 进程也拿不到 `DSH_PROFILE`**
+   (该变量只由 `dsh-shell-env` 注入模型 shell 调用),它把 profile 当位置参数传
+   (实测宿主命令行为 `DeepSeek Harness.exe --expose-internals .../dsh-desktop-host/lib/index.js
+   .../app.asar/dsh <profileDir> ...`)。曾经漏掉这两级 → profileDir 指向不存在的
+   `~/.dsh/profiles/web`,所有备份的 profile 组件恒为空(见 CHANGELOG「未发布」修复条)。
    新一代安装包是 Electron 版(`DeepSeek Harness.exe`),dsh 核心在
    `resources/app.asar(.unpacked)` 里;只读探查契约可以,不要动用户本地安装。
+9. **`cordis.patch.yml` 是用户配置本体,不能套用「只补缺」**:DSH 的 `initProfile()` 会在 profile
+   初始化时就用空模板(注释 + `[]`)建好它,**换机后必然已存在**,所以「文件存在 ⇒ 本机有配置」
+   是错的。还原判定统一走 `shouldRestoreProfileEntry()`(预检 `planImport` 与执行 `applyImport`
+   必须共用,否则预检会骗用户):覆盖模式强制还原(`commitFile` 自动留 `.bak`)、合并模式下本机
+   只是空模板(`isEmptyPatchText()`)时也还原、本机有非空配置才保留并告警;`package.json` /
+   `cordis.yml` / `pnpm-workspace.yaml` 维持只补缺。patch 层只在启动时加载,写入后必须置
+   `needsRestart`。别忘了 `$DSH_HOME/cordis.patch.yml` 这个**叠加在所有 profile 之上的根 patch 层**
+   也要备份(zip 路径 `payload/profile-home/cordis.patch.yml`),它与 profile 内那份的
+   `component`/`rel` 相同,暂存名必须靠 `cls.home` 区分,否则会在暂存区互相覆盖。
 
 ## 版本与发布清单(每次发版逐条打勾)
 
